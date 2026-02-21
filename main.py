@@ -1,4 +1,4 @@
-# main.py (полная версия с исправленным синтаксисом)
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
