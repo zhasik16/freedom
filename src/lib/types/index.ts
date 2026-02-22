@@ -13,7 +13,7 @@ export interface Address {
   coordinates?: Coordinates;
 }
 
-export type TicketType = 
+export type TicketType =
   | 'complaint'
   | 'data_change'
   | 'consultation'
@@ -32,7 +32,7 @@ export type BusinessUnit = string;
 export interface AITicketAnalysis {
   type: TicketType;
   sentiment: Sentiment;
-  priority: number; // 1 - urgent, 2 - high, 3 - medium, 4 - low
+  priority: number; // 1-10 scale (1 = most urgent, 10 = least)
   language: Language;
   summary: string;
   recommendedAction: string;
@@ -198,22 +198,21 @@ export const getSegmentFromString = (segment: string): Segment => {
   return map[segment] || 'Mass';
 };
 
-export const getPriorityNumber = (priority: string): number => {
+export const getPriorityNumber = (priority: string | number): number => {
+  if (typeof priority === 'number') return priority;
   const map: Record<string, number> = {
     'urgent': 1,
-    'high': 2,
-    'medium': 3,
-    'low': 4
+    'high': 3,
+    'medium': 5,
+    'low': 8
   };
-  return map[priority] || 3;
+  return map[priority] || 5;
 };
 
-export const getPriorityString = (priority: number): string => {
-  const map: Record<number, string> = {
-    1: 'urgent',
-    2: 'high',
-    3: 'medium',
-    4: 'low'
-  };
-  return map[priority] || 'medium';
+export const getPriorityLabel = (priority: number): string => {
+  if (priority <= 2) return 'Критический';
+  if (priority <= 4) return 'Высокий';
+  if (priority <= 6) return 'Средний';
+  if (priority <= 8) return 'Низкий';
+  return 'Минимальный';
 };

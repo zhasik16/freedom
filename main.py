@@ -1,4 +1,9 @@
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -17,11 +22,16 @@ import re
 import math
 import random
 from collections import defaultdict, deque
+import asyncpg
 
-# ---------- КОНФИГУРАЦИЯ ДЛЯ GOOGLE GEMINI API ----------
-YOUR_API_KEY = "AIzaSyDEUrHECahKcqd3wVw3SkWigpTu3WkuUY0"
+# ---------- КОНФИГУРАЦИЯ ----------
+YOUR_API_KEY = os.getenv("GEMINI_API")
 AI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 AI_MODEL = "gemini-2.5-flash"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# ---------- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ БД ----------
+db_pool: Optional[asyncpg.Pool] = None
 
 # ---------- ГЛОБАЛЬНЫЕ ДАННЫЕ ----------
 BUSINESS_UNITS = []
@@ -498,8 +508,8 @@ class GoogleAIClient:
         
         return 'ru'
     
-    def detect_priority_keywords(self, text: str) -> str:
-        """Определение приоритета по ключевым словам"""
+    def detect_priority_keywords(self, text: str) -> Optional[int]:
+        """Определение приоритета по ключевым словам (1-10 шкала)"""
         text_lower = text.lower()
         
         urgent_words = [
@@ -519,11 +529,11 @@ class GoogleAIClient:
         
         for word in urgent_words:
             if word in text_lower:
-                return 'urgent'
+                return 1
         
         for word in high_words:
             if word in text_lower:
-                return 'high'
+                return 3
         
         return None
     
@@ -546,11 +556,12 @@ class GoogleAIClient:
 - Мошеннические действия: подозрения на мошенничество
 - Спам: реклама, рассылки
 
-Приоритет:
-- urgent: срочно, немедленно, блокировка, заблокирован, !!!
-- high: важно, проблема, ошибка, деньги, доступ
-- medium: обычные вопросы
-- low: спасибо, отзывы
+Приоритетность: целое число от 1 до 10, где:
+- 1-2: критическая срочность (блокировка, мошенничество, угрозы судом)
+- 3-4: высокая срочность (деньги не пришли, доступ потерян)
+- 5-6: средняя (обычные вопросы, консультации)
+- 7-8: низкая (информационные запросы)
+- 9-10: минимальная (спам, благодарности)
 
 Тональность:
 - negative: клиент зол, кричит, угрожает
@@ -561,7 +572,7 @@ class GoogleAIClient:
 - ticket_type: тип обращения
 - summary: краткая суть (макс 150 символов)
 - sentiment: positive/neutral/negative
-- priority: low/medium/high/urgent
+- priority: целое число от 1 до 10
 - keywords: список ключевых слов (макс 3)
 - language: ru/kz/en
 - is_spam: true/false
@@ -605,9 +616,15 @@ class GoogleAIClient:
                     response_text = response_text.replace("```json", "").replace("```", "").strip()
                     enriched_data = json.loads(response_text)
                     
-                    ai_priority = enriched_data.get("priority", "").lower()
-                    if priority_hint and ai_priority != priority_hint:
+                    ai_priority = enriched_data.get("priority", 5)
+                    try:
+                        ai_priority = int(ai_priority)
+                    except (ValueError, TypeError):
+                        ai_priority = 5
+                    if priority_hint is not None:
                         enriched_data["priority"] = priority_hint
+                    else:
+                        enriched_data["priority"] = max(1, min(10, ai_priority))
                     
                     ai_lang = enriched_data.get("language", "")
                     if ai_lang not in ["ru", "kz", "en"]:
@@ -656,10 +673,10 @@ class GoogleAIClient:
         else:
             ticket_type = "Консультация"
         
-        if forced_priority:
+        if forced_priority is not None:
             priority = forced_priority
         else:
-            priority = self.detect_priority_keywords(text) or "medium"
+            priority = self.detect_priority_keywords(text) or 5
         
         if forced_lang:
             language = forced_lang
@@ -684,12 +701,17 @@ class GoogleAIClient:
         
         summary = text[:100] + "..." if len(text) > 100 else text
         
-        suggested_actions = {
-            "urgent": "urgent_review",
-            "high": "call_back",
-            "medium": "email_reply",
-            "low": "standard_review"
-        }
+        if isinstance(priority, int):
+            if priority <= 2:
+                suggested_action = "urgent_review"
+            elif priority <= 4:
+                suggested_action = "call_back"
+            elif priority <= 7:
+                suggested_action = "email_reply"
+            else:
+                suggested_action = "standard_review"
+        else:
+            suggested_action = "standard_review"
         
         result = {
             "ticket_type": ticket_type,
@@ -699,7 +721,7 @@ class GoogleAIClient:
             "keywords": [],
             "language": language,
             "is_spam": ticket_type == "Спам",
-            "suggested_action": suggested_actions.get(priority, "standard_review")
+            "suggested_action": suggested_action
         }
         
         if address:
@@ -716,11 +738,7 @@ class TicketStatus(str, Enum):
     RESOLVED = "resolved"
     CLOSED = "closed"
 
-class TicketPriority(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    URGENT = "urgent"
+# Priority is now an integer 1-10 (no enum)
 
 class TicketType(str, Enum):
     COMPLAINT = "Жалоба"
@@ -743,7 +761,7 @@ class TicketResponse(BaseModel):
     client_guid: str
     description: str
     status: TicketStatus
-    priority: TicketPriority
+    priority: int  # 1-10 scale
     ticket_type: TicketType
     summary: str
     sentiment: str
@@ -766,13 +784,7 @@ class TicketStore:
     
     def add(self, ticket: Dict[str, Any]):
         self.tickets[ticket['id']] = ticket
-        priority_map = {
-            TicketPriority.URGENT: 0,
-            TicketPriority.HIGH: 1,
-            TicketPriority.MEDIUM: 2,
-            TicketPriority.LOW: 3
-        }
-        priority_value = priority_map.get(ticket['priority'], 2)
+        priority_value = ticket.get('priority', 5)  # 1-10 int, lower = more urgent
         heapq.heappush(self.queue, (priority_value, ticket['created_at'], ticket['id']))
     
     def get(self, ticket_id: str) -> Optional[Dict[str, Any]]:
@@ -831,7 +843,7 @@ async def create_ticket(ticket: TicketCreate):
         "address": ticket.address,
         "attachments": ticket.attachments or [],
         "status": TicketStatus.NEW,
-        "priority": enriched.get("priority", TicketPriority.MEDIUM),
+        "priority": enriched.get("priority", 5),
         "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
         "summary": enriched.get("summary", ""),
         "sentiment": enriched.get("sentiment", "neutral"),
@@ -887,6 +899,14 @@ async def create_ticket(ticket: TicketCreate):
             update_round_robin_queue(office, 'GENERAL', old_manager, updated_manager)
     
     ticket_store.add(new_ticket)
+    
+    # Persist to PostgreSQL
+    await save_ticket_to_db(new_ticket)
+    if manager_assignment:
+        mgr_fio = manager_assignment['manager']['ФИО']
+        new_load = updated_manager.get('Количество обращений в работе', 0)
+        await update_manager_load_in_db(mgr_fio, new_load)
+    
     return new_ticket
 
 @app.get("/api/tickets/{ticket_id}", response_model=TicketResponse)
@@ -898,6 +918,11 @@ async def get_ticket(ticket_id: str):
 
 @app.get("/api/tickets")
 async def list_tickets(skip: int = 0, limit: int = 100):
+    # Try DB first, fallback to in-memory
+    if db_pool:
+        db_tickets = await get_all_tickets_from_db()
+        if db_tickets:
+            return db_tickets[skip:skip + limit]
     tickets = ticket_store.list()
     return tickets[skip:skip + limit]
 
@@ -1267,7 +1292,7 @@ async def process_csv_ticket_row(row: dict) -> Optional[Dict[str, Any]]:
             "address": address,
             "attachments": [],
             "status": TicketStatus.NEW,
-            "priority": enriched.get("priority", TicketPriority.MEDIUM),
+            "priority": enriched.get("priority", 5),
             "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
             "summary": enriched.get("summary", ""),
             "sentiment": enriched.get("sentiment", "neutral"),
@@ -1305,6 +1330,15 @@ async def process_csv_ticket_row(row: dict) -> Optional[Dict[str, Any]]:
                 if m['ФИО'] == manager_assignment['manager']['ФИО']:
                     MANAGERS[i]['Количество обращений в работе'] = \
                         MANAGERS[i].get('Количество обращений в работе', 0) + 1
+                    break
+        
+        # Persist to PostgreSQL
+        await save_ticket_to_db(new_ticket)
+        if manager_assignment:
+            mgr_fio = manager_assignment['manager']['ФИО']
+            for m in MANAGERS:
+                if m['ФИО'] == mgr_fio:
+                    await update_manager_load_in_db(mgr_fio, m.get('Количество обращений в работе', 0))
                     break
         
         return new_ticket
@@ -1404,14 +1438,213 @@ def process_csv_unit_row(row: dict) -> Optional[Dict[str, Any]]:
 
 @app.on_event("startup")
 async def startup_event():
+    global db_pool, BUSINESS_UNITS, MANAGERS
     print("="*70)
     print("🚀 SMART ASSIGNMENT ENGINE STARTED")
     print("="*70)
+
+    # ---------- PostgreSQL ----------
+    if DATABASE_URL:
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10, ssl="require")
+            print("✅ Подключено к PostgreSQL")
+
+            async with db_pool.acquire() as conn:
+                # Create tables
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS tickets (
+                        id UUID PRIMARY KEY,
+                        client_guid VARCHAR(255),
+                        description TEXT,
+                        segment VARCHAR(20),
+                        address TEXT,
+                        attachments TEXT[],
+                        status VARCHAR(20) DEFAULT 'new',
+                        priority INTEGER DEFAULT 5,
+                        ticket_type VARCHAR(50),
+                        summary TEXT,
+                        sentiment VARCHAR(20),
+                        language VARCHAR(10) DEFAULT 'ru',
+                        is_spam BOOLEAN DEFAULT FALSE,
+                        suggested_action VARCHAR(50),
+                        assigned_manager VARCHAR(100),
+                        assigned_office VARCHAR(100),
+                        assignment_reason VARCHAR(100),
+                        distance_to_office FLOAT,
+                        required_skills TEXT[],
+                        enriched_data JSONB,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    );
+
+                    CREATE TABLE IF NOT EXISTS managers (
+                        id SERIAL PRIMARY KEY,
+                        fio VARCHAR(100) UNIQUE,
+                        position VARCHAR(50),
+                        skills TEXT[],
+                        office VARCHAR(100),
+                        current_load INTEGER DEFAULT 0
+                    );
+
+                    CREATE TABLE IF NOT EXISTS business_units (
+                        id SERIAL PRIMARY KEY,
+                        office VARCHAR(100) UNIQUE,
+                        address TEXT,
+                        lat FLOAT,
+                        lon FLOAT
+                    );
+                """)
+                print("✅ Таблицы созданы/проверены")
+
+                # Seed data if tables are empty
+                mgr_count = await conn.fetchval("SELECT COUNT(*) FROM managers")
+                bu_count = await conn.fetchval("SELECT COUNT(*) FROM business_units")
+
+                if mgr_count == 0 or bu_count == 0:
+                    print("📦 Таблицы пусты, загружаем из datasets.json...")
+                    try:
+                        with open('datasets.json', 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+
+                        if bu_count == 0:
+                            for unit in data.get('business_units', []):
+                                coords = get_city_coordinates(unit['Офис'])
+                                await conn.execute(
+                                    "INSERT INTO business_units (office, address, lat, lon) VALUES ($1, $2, $3, $4) ON CONFLICT (office) DO NOTHING",
+                                    unit['Офис'], unit['Адрес'], coords['lat'], coords['lon']
+                                )
+                            print(f"  ✅ Загружено {len(data.get('business_units', []))} офисов в БД")
+
+                        if mgr_count == 0:
+                            for mgr in data.get('managers', []):
+                                await conn.execute(
+                                    "INSERT INTO managers (fio, position, skills, office, current_load) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (fio) DO NOTHING",
+                                    mgr['ФИО'], mgr.get('Должность ', ''), mgr.get('Навыки', []),
+                                    mgr.get('Офис', ''), mgr.get('Количество обращений в работе', 0)
+                                )
+                            print(f"  ✅ Загружено {len(data.get('managers', []))} менеджеров в БД")
+                    except Exception as e:
+                        print(f"  ⚠️ Ошибка seed: {e}")
+
+                # Load from DB into memory for Round Robin
+                rows = await conn.fetch("SELECT * FROM business_units")
+                BUSINESS_UNITS = []
+                for r in rows:
+                    BUSINESS_UNITS.append({
+                        'Офис': r['office'],
+                        'Адрес': r['address'],
+                        'coordinates': {'lat': r['lat'], 'lon': r['lon']}
+                    })
+
+                rows = await conn.fetch("SELECT * FROM managers")
+                MANAGERS = []
+                for r in rows:
+                    MANAGERS.append({
+                        'ФИО': r['fio'],
+                        'Должность ': r['position'],
+                        'Навыки': list(r['skills']) if r['skills'] else [],
+                        'Офис': r['office'],
+                        'Количество обращений в работе': r['current_load']
+                    })
+
+                initialize_round_robin_queues()
+
+        except Exception as e:
+            print(f"❌ PostgreSQL Error: {e}")
+            print("⚠️ Falling back to in-memory mode")
+    else:
+        print("⚠️ DATABASE_URL не задан, используется in-memory режим")
+
     print(f"📊 Загружено офисов: {len(BUSINESS_UNITS)}")
     print(f"👥 Загружено менеджеров: {len(MANAGERS)}")
     print(f"📍 Офисы:")
     for office in BUSINESS_UNITS:
-        print(f"   - {office['Офис']}: {office['Адрес']}")
+        print(f"   - {office['Офис']}: {office.get('Адрес', '')}")
     print("="*70)
     print("🔄 Round Robin очереди инициализированы")
     print("="*70)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        print("🔌 PostgreSQL pool closed")
+
+
+# ---------- DB HELPER FUNCTIONS ----------
+async def save_ticket_to_db(ticket: Dict[str, Any]):
+    """Save ticket to PostgreSQL"""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO tickets (id, client_guid, description, segment, address, attachments,
+                    status, priority, ticket_type, summary, sentiment, language, is_spam,
+                    suggested_action, assigned_manager, assigned_office, assignment_reason,
+                    distance_to_office, required_skills, enriched_data, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22)
+                ON CONFLICT (id) DO UPDATE SET
+                    priority=$8, assigned_manager=$15, assigned_office=$16,
+                    assignment_reason=$17, updated_at=$22
+            """,
+                uuid.UUID(ticket['id']),
+                ticket.get('client_guid', ''),
+                ticket.get('description', ''),
+                ticket.get('segment', 'Mass'),
+                ticket.get('address', ''),
+                ticket.get('attachments', []),
+                str(ticket.get('status', 'new')),
+                int(ticket.get('priority', 5)),
+                str(ticket.get('ticket_type', 'Консультация')),
+                ticket.get('summary', ''),
+                ticket.get('sentiment', 'neutral'),
+                ticket.get('language', 'ru'),
+                ticket.get('is_spam', False),
+                ticket.get('suggested_action', 'standard_review'),
+                ticket.get('assigned_manager'),
+                ticket.get('assigned_office'),
+                ticket.get('assignment_reason'),
+                ticket.get('distance_to_office'),
+                ticket.get('required_skills', []),
+                json.dumps(ticket.get('enriched_data', {}), ensure_ascii=False, default=str),
+                ticket.get('created_at', datetime.now()),
+                ticket.get('updated_at', datetime.now())
+            )
+    except Exception as e:
+        print(f"❌ DB save ticket error: {e}")
+
+
+async def update_manager_load_in_db(fio: str, new_load: int):
+    """Update manager load in PostgreSQL"""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE managers SET current_load = $1 WHERE fio = $2",
+                new_load, fio
+            )
+    except Exception as e:
+        print(f"❌ DB update manager error: {e}")
+
+
+async def get_all_tickets_from_db() -> List[Dict[str, Any]]:
+    """Get all tickets from PostgreSQL"""
+    if not db_pool:
+        return []
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM tickets ORDER BY priority ASC, created_at DESC")
+            tickets = []
+            for r in rows:
+                ticket = dict(r)
+                ticket['id'] = str(ticket['id'])
+                ticket['enriched_data'] = ticket.get('enriched_data', {})
+                tickets.append(ticket)
+            return tickets
+    except Exception as e:
+        print(f"❌ DB get tickets error: {e}")
+        return []
