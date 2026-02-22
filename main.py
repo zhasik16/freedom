@@ -825,6 +825,103 @@ app.add_middleware(
     ],
 )
 
+@app.get("/")
+async def root():
+    return {
+        "name": "F.I.R.E. — Freedom Intelligent Routing Engine",
+        "version": "1.0.0",
+        "status": "running",
+        "offices": len(BUSINESS_UNITS),
+        "managers": len(MANAGERS),
+        "db_connected": db_pool is not None
+    }
+
+@app.post("/api/seed")
+async def seed_tickets():
+    """Обработать все тикеты из datasets.json через AI и сохранить"""
+    try:
+        with open('datasets.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        raw_tickets = data.get('tickets', [])
+        processed = 0
+        errors = 0
+        
+        for i, t in enumerate(raw_tickets):
+            try:
+                description = t.get('Описание ', '') or t.get('Описание', '') or ''
+                if not description and t.get('Вложения'):
+                    description = 'Обращение без текста (только вложение)'
+                elif not description:
+                    continue
+                
+                segment = t.get('Сегмент клиента', 'Mass')
+                address_parts = [p for p in [
+                    t.get('Страна', ''), t.get('Область', ''),
+                    t.get('Населённый пункт', ''), t.get('Улица', ''),
+                    str(t.get('Дом', '')) if t.get('Дом') else ''
+                ] if p]
+                address = ', '.join(address_parts)
+                
+                print(f"\n📝 [{i+1}/{len(raw_tickets)}] {t.get('GUID клиента', '?')[:8]}...")
+                
+                enriched = await ai_client.enrich(text=description, address=address)
+                
+                now = datetime.now()
+                ticket_id = str(uuid.uuid4())
+                
+                new_ticket = {
+                    "id": ticket_id,
+                    "client_guid": t.get('GUID клиента', str(uuid.uuid4())),
+                    "description": description,
+                    "segment": segment,
+                    "address": address,
+                    "attachments": [t['Вложения']] if t.get('Вложения') else [],
+                    "status": TicketStatus.NEW,
+                    "priority": enriched.get("priority", 5),
+                    "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
+                    "summary": enriched.get("summary", ""),
+                    "sentiment": enriched.get("sentiment", "neutral"),
+                    "language": enriched.get("language", "ru"),
+                    "is_spam": enriched.get("is_spam", False),
+                    "suggested_action": enriched.get("suggested_action", "standard_review"),
+                    "assigned_manager": None, "assigned_office": None,
+                    "assignment_reason": None, "distance_to_office": None,
+                    "required_skills": None,
+                    "created_at": now, "updated_at": now,
+                    "enriched_data": enriched
+                }
+                
+                assignment = find_best_manager_for_ticket(
+                    {"segment": segment, "address": address}, enriched
+                )
+                if assignment:
+                    new_ticket["assigned_manager"] = assignment['manager']['ФИО']
+                    new_ticket["assigned_office"] = assignment['office']['Офис']
+                    new_ticket["assignment_reason"] = assignment['reason']
+                    new_ticket["distance_to_office"] = assignment['office'].get('distance_km')
+                    new_ticket["required_skills"] = assignment.get('required_skills', [])
+                    mgr = assignment['manager']
+                    new_load = mgr.get('Количество обращений в работе', 0) + 1
+                    for j, m in enumerate(MANAGERS):
+                        if m['ФИО'] == mgr['ФИО']:
+                            MANAGERS[j]['Количество обращений в работе'] = new_load
+                            break
+                    await update_manager_load_in_db(mgr['ФИО'], new_load)
+                
+                ticket_store.add(new_ticket)
+                await save_ticket_to_db(new_ticket)
+                processed += 1
+                print(f"  ✅ {enriched.get('ticket_type','?')} | p={enriched.get('priority','?')} | → {new_ticket.get('assigned_manager','—')}")
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                errors += 1
+                print(f"  ❌ Ошибка: {e}")
+        
+        return {"success": True, "processed": processed, "total": len(raw_tickets), "errors": errors}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/tickets", response_model=TicketResponse)
 async def create_ticket(ticket: TicketCreate):
     ticket_id = str(uuid.uuid4())
