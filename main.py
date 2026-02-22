@@ -29,7 +29,7 @@ import traceback
 # ---------- КОНФИГУРАЦИЯ ----------
 YOUR_API_KEY = os.getenv("GEMINI_API")
 AI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-AI_MODEL = "gemini-2.5-flash"
+AI_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-lite"]
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ---------- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ БД ----------
@@ -516,79 +516,189 @@ class GoogleAIClient:
 
 Текст обращения: {text}
 """
-            
+        
             if address:
                 prompt += f"\nАдрес клиента: {address}"
             
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{self.base_url}/models/{AI_MODEL}:generateContent",
-                    params={"key": self.api_key},
-                    json={
-                        "contents": [{
-                            "parts": [{"text": prompt}]
-                        }],
-                        "generationConfig": {
-                            "temperature": 0.1,
-                            "topK": 1,
-                            "topP": 1,
-                            "maxOutputTokens": 500,
-                        }
-                    }
-                )
-                
-                if response.status_code != 200:
-                    print(f"Google AI API Error: {response.status_code}")
-                    return self._fallback_enrich(text, address, simple_lang, priority_hint)
-                
-                result = response.json()
-                
+            last_error = ""
+            for model_name in AI_MODELS:
                 try:
-                    candidate = result.get("candidates", [{}])[0]
-                    content = candidate.get("content", {})
-                    parts = content.get("parts", [{}])
-                    response_text = parts[0].get("text", "{}")
-                    
-                    response_text = response_text.replace("```json", "").replace("```", "").strip()
-                    enriched_data = json.loads(response_text)
-                    
-                    ai_priority = enriched_data.get("priority", 5)
-                    try:
-                        ai_priority = int(ai_priority)
-                    except (ValueError, TypeError):
-                        ai_priority = 5
-                    if priority_hint is not None:
-                        enriched_data["priority"] = priority_hint
-                    else:
-                        enriched_data["priority"] = max(1, min(10, ai_priority))
-                    
-                    ai_lang = enriched_data.get("language", "")
-                    if ai_lang not in ["ru", "kz", "en"]:
-                        enriched_data["language"] = simple_lang
-                    
-                    summary = enriched_data.get("summary", "")
-                    if "рекомендация" not in summary.lower():
-                        priority = enriched_data.get("priority", "medium")
-                        if priority == "urgent":
-                            enriched_data["summary"] = summary + " Рекомендация: срочно связаться"
-                        elif priority == "high":
-                            enriched_data["summary"] = summary + " Рекомендация: приоритетно"
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            f"{self.base_url}/models/{model_name}:generateContent",
+                            params={"key": self.api_key},
+                            json={
+                                "contents": [{
+                                    "parts": [{"text": prompt}]
+                                }],
+                                "generationConfig": {
+                                    "temperature": 0.1,
+                                    "topK": 1,
+                                    "topP": 1,
+                                    "maxOutputTokens": 500,
+                                }
+                            }
+                        )
+                        
+                        if response.status_code == 429:
+                            print(f"Google AI API Quota Error for {model_name}, trying next...")
+                            last_error = f"429 Quota Exceeded on {model_name}"
+                            continue
+                            
+                        if response.status_code != 200:
+                            print(f"Google AI API Error with {model_name}: {response.status_code} - {response.text}")
+                            last_error = f"{response.status_code} error on {model_name}"
+                            continue
+                        
+                        result = response.json()
+                        candidate = result.get("candidates", [{}])[0]
+                        content = candidate.get("content", {})
+                        parts = content.get("parts", [{}])
+                        response_text = parts[0].get("text", "{}")
+                        
+                        response_text = response_text.replace("```json", "").replace("```", "").strip()
+                        enriched_data = json.loads(response_text)
+                        
+                        ai_priority = enriched_data.get("priority", 5)
+                        try:
+                            ai_priority = int(ai_priority)
+                        except (ValueError, TypeError):
+                            ai_priority = 5
+                        if priority_hint is not None:
+                            enriched_data["priority"] = priority_hint
                         else:
-                            enriched_data["summary"] = summary + " Рекомендация: стандартно"
-                    
-                    if address and "coordinates" not in enriched_data:
-                        enriched_data["coordinates"] = get_address_coordinates(address)
-                        print(f"  🗺️ Координаты определены: {enriched_data['coordinates']}")
-                    
-                    return enriched_data
-                    
+                            enriched_data["priority"] = max(1, min(10, ai_priority))
+                        
+                        ai_lang = enriched_data.get("language", "")
+                        if ai_lang not in ["ru", "kz", "en"]:
+                            enriched_data["language"] = simple_lang
+                        
+                        summary = enriched_data.get("summary", "")
+                        if "рекомендация" not in summary.lower():
+                            priority = enriched_data.get("priority", "medium")
+                            if priority == "urgent":
+                                enriched_data["summary"] = summary + " Рекомендация: срочно связаться"
+                            elif priority == "high":
+                                enriched_data["summary"] = summary + " Рекомендация: приоритетно"
+                            else:
+                                enriched_data["summary"] = summary + " Рекомендация: стандартно"
+                        
+                        if address and "coordinates" not in enriched_data:
+                            enriched_data["coordinates"] = get_address_coordinates(address)
+                            print(f"  🗺️ Координаты определены: {enriched_data['coordinates']}")
+                        
+                        return enriched_data
+
                 except Exception as e:
-                    print(f"Error parsing Gemini response: {e}")
-                    return self._fallback_enrich(text, address, simple_lang, priority_hint)
+                    print(f"Error parsing Gemini response from {model_name}: {e}")
+                    last_error = str(e)
+                    continue
+
+            print(f"All Google AI models failed. Last error: {last_error}. Using offline fallback.")
+            return self._fallback_enrich(text, address, simple_lang, priority_hint)
                     
         except Exception as e:
             print(f"Google AI API Error: {e}")
             return self._fallback_enrich(text, address)
+
+    async def enrich_batch(self, tickets: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+        """Обогащение списка тикетов за один API вызов для обхода лимитов"""
+        results = {}
+        if not tickets:
+            return results
+            
+        prompt = f"""Ты - AI ассистент. Проанализируй МАССИВ обращений клиентов и верни ТОЛЬКО массив JSON объектов (без форматирования markdown).
+
+Правила полей для каждого объекта:
+- id: строковый ID из входящего списка (ОБЯЗАТЕЛЬНО)
+- ticket_type: Жалоба, Смена данных, Консультация, Претензия, Неработоспособность приложения, Мошеннические действия, Спам
+- summary: краткая суть обращения (до 150 символов)
+- sentiment: positive/neutral/negative
+- priority: число от 1 до 10 (1-2 критично, 9-10 неважно)
+- keywords: список из 3 ключевых слов
+- language: ru/kz/en
+- is_spam: true/false
+- suggested_action: call_back/email_reply/urgent_review/standard_review
+
+Входящие обращения:
+{json.dumps(tickets, ensure_ascii=False, indent=2)}
+"""
+
+        try:
+            last_error = ""
+            for model_name in AI_MODELS:
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(
+                            f"{self.base_url}/models/{model_name}:generateContent",
+                            params={"key": self.api_key},
+                            json={
+                                "contents": [{"parts": [{"text": prompt}]}],
+                                "generationConfig": {
+                                    "temperature": 0.1,
+                                    "topK": 1,
+                                    "topP": 1,
+                                    "maxOutputTokens": 2048,
+                                }
+                            }
+                        )
+                        
+                        if response.status_code == 429:
+                            print(f"Google AI API Batch Quota Error for {model_name}, trying next...")
+                            last_error = f"429 Quota Exceeded on {model_name}"
+                            continue
+
+                        if response.status_code != 200:
+                            print(f"Google AI API Batch Error with {model_name}: {response.status_code} - {response.text}")
+                            last_error = f"{response.status_code} error on {model_name}"
+                            continue
+
+                        result = response.json()
+                        candidate = result.get("candidates", [{}])[0]
+                        content = candidate.get("content", {})
+                        parts = content.get("parts", [{}])
+                        response_text = parts[0].get("text", "[]")
+                        
+                        response_text = response_text.replace("```json", "").replace("```", "").strip()
+                        enriched_list = json.loads(response_text)
+                        
+                        for enriched_data in enriched_list:
+                            # Валидация
+                            tid = str(enriched_data.get("id"))
+                            
+                            ai_priority = enriched_data.get("priority", 5)
+                            try: ai_priority = int(ai_priority)
+                            except: ai_priority = 5
+                            enriched_data["priority"] = max(1, min(10, ai_priority))
+                            
+                            if "рекомендация" not in enriched_data.get("summary", "").lower():
+                                if ai_priority <= 2:
+                                    enriched_data["summary"] += " Рекомендация: срочно"
+                                    
+                            results[tid] = enriched_data
+                        
+                        return results # Success!
+                        
+                except Exception as e:
+                    print(f"Error parsing Gemini BATCH response from {model_name}: {e}")
+                    last_error = str(e)
+                    continue
+
+            print(f"All Google AI batch models failed. Last error: {last_error}. Using offline fallback.")
+            for t in tickets:
+                results[t["id"]] = self._fallback_enrich(t.get("text", ""), t.get("address", ""))
+                
+        except Exception as e:
+            print(f"Error parsing Gemini BATCH response globally: {e}")
+            for t in tickets:
+                results[t["id"]] = self._fallback_enrich(t.get("text", ""), t.get("address", ""))
+                
+        # Fill missing ones with fallback if AI dropped them
+        for t in tickets:
+            if t["id"] not in results:
+                results[t["id"]] = self._fallback_enrich(t.get("text", ""), t.get("address", ""))
+        
+        return results
     
     def _fallback_enrich(self, text: str, address: str = None, forced_lang: str = None, forced_priority: str = None) -> Dict[str, Any]:
         """Резервный метод"""
@@ -798,15 +908,22 @@ async def seed_tickets():
         processed = 0
         errors = 0
         
-        for i, t in enumerate(raw_tickets):
-            try:
+        # Разделяем на чанки по 20 тикетов, чтобы AI мог обработать за раз без лимитов RPS
+        CHUNK_SIZE = 20
+        for i in range(0, len(raw_tickets), CHUNK_SIZE):
+            chunk = raw_tickets[i:i + CHUNK_SIZE]
+            
+            # Подготавливаем данные для AI
+            batch_payload = []
+            valid_chunk_mapping = []
+            
+            for t in chunk:
                 description = t.get('Описание ', '') or t.get('Описание', '') or ''
                 if not description and t.get('Вложения'):
                     description = 'Обращение без текста (только вложение)'
                 elif not description:
                     continue
                 
-                segment = t.get('Сегмент клиента', 'Mass')
                 address_parts = [p for p in [
                     t.get('Страна', ''), t.get('Область', ''),
                     t.get('Населённый пункт', ''), t.get('Улица', ''),
@@ -814,60 +931,93 @@ async def seed_tickets():
                 ] if p]
                 address = ', '.join(address_parts)
                 
-                print(f"\n📝 [{i+1}/{len(raw_tickets)}] {t.get('GUID клиента', '?')[:8]}...")
+                tid = t.get('GUID клиента', str(uuid.uuid4()))
+                batch_payload.append({
+                    "id": tid,
+                    "text": description,
+                    "address": address
+                })
                 
-                enriched = await ai_client.enrich(text=description, address=address)
-                
-                now = datetime.now()
-                ticket_id = str(uuid.uuid4())
-                
-                new_ticket = {
-                    "id": ticket_id,
-                    "client_guid": t.get('GUID клиента', str(uuid.uuid4())),
+                valid_chunk_mapping.append({
+                    "original_t": t,
+                    "id": tid,
                     "description": description,
-                    "segment": segment,
-                    "address": address,
-                    "attachments": [t['Вложения']] if t.get('Вложения') else [],
-                    "status": TicketStatus.NEW,
-                    "priority": enriched.get("priority", 5),
-                    "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
-                    "summary": enriched.get("summary", ""),
-                    "sentiment": enriched.get("sentiment", "neutral"),
-                    "language": enriched.get("language", "ru"),
-                    "is_spam": enriched.get("is_spam", False),
-                    "suggested_action": enriched.get("suggested_action", "standard_review"),
-                    "assigned_manager": None, "assigned_office": None,
-                    "assignment_reason": None, "distance_to_office": None,
-                    "required_skills": None,
-                    "created_at": now, "updated_at": now,
-                    "enriched_data": enriched
-                }
+                    "address": address
+                })
+            
+            if not batch_payload:
+                continue
                 
-                assignment = find_best_manager_for_ticket(
-                    {"segment": segment, "address": address}, enriched
-                )
-                if assignment:
-                    new_ticket["assigned_manager"] = assignment['manager']['ФИО']
-                    new_ticket["assigned_office"] = assignment['office']['Офис']
-                    new_ticket["assignment_reason"] = assignment['reason']
-                    new_ticket["distance_to_office"] = assignment['office'].get('distance_km')
-                    new_ticket["required_skills"] = assignment.get('required_skills', [])
-                    mgr = assignment['manager']
-                    new_load = mgr.get('Количество обращений в работе', 0) + 1
-                    for j, m in enumerate(MANAGERS):
-                        if m['ФИО'] == mgr['ФИО']:
-                            MANAGERS[j]['Количество обращений в работе'] = new_load
-                            break
-                    await update_manager_load_in_db(mgr['ФИО'], new_load)
-                
-                ticket_store.add(new_ticket)
-                await save_ticket_to_db(new_ticket)
-                processed += 1
-                print(f"  ✅ {enriched.get('ticket_type','?')} | p={enriched.get('priority','?')} | → {new_ticket.get('assigned_manager','—')}")
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                errors += 1
-                print(f"  ❌ Ошибка: {e}")
+            print(f"\n📦 Отправка батча из {len(batch_payload)} тикетов в Gemini AI...")
+            batch_results = await ai_client.enrich_batch(batch_payload)
+            
+            # Обрабатываем результаты
+            for item in valid_chunk_mapping:
+                try:
+                    t = item['original_t']
+                    tid = item['id']
+                    description = item['description']
+                    address = item['address']
+                    
+                    segment = t.get('Сегмент клиента', 'Mass')
+                    
+                    enriched = batch_results.get(tid, {})
+                    
+                    # Добавляем геолокацию на бэкенде
+                    if address and "coordinates" not in enriched:
+                        enriched["coordinates"] = get_address_coordinates(address)
+
+                    now = datetime.now()
+                    ticket_id = str(uuid.uuid4())
+                    
+                    new_ticket = {
+                        "id": ticket_id,
+                        "client_guid": tid,
+                        "description": description,
+                        "segment": segment,
+                        "address": address,
+                        "attachments": [t['Вложения']] if t.get('Вложения') else [],
+                        "status": TicketStatus.NEW,
+                        "priority": enriched.get("priority", 5),
+                        "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
+                        "summary": enriched.get("summary", ""),
+                        "sentiment": enriched.get("sentiment", "neutral"),
+                        "language": enriched.get("language", "ru"),
+                        "is_spam": enriched.get("is_spam", False),
+                        "suggested_action": enriched.get("suggested_action", "standard_review"),
+                        "assigned_manager": None, "assigned_office": None,
+                        "assignment_reason": None, "distance_to_office": None,
+                        "required_skills": None,
+                        "created_at": now, "updated_at": now,
+                        "enriched_data": enriched
+                    }
+                    
+                    assignment = find_best_manager_for_ticket(
+                        {"segment": segment, "address": address}, enriched
+                    )
+                    if assignment:
+                        new_ticket["assigned_manager"] = assignment['manager']['ФИО']
+                        new_ticket["assigned_office"] = assignment['office']['Офис']
+                        new_ticket["assignment_reason"] = assignment['reason']
+                        new_ticket["distance_to_office"] = assignment['office'].get('distance_km')
+                        new_ticket["required_skills"] = assignment.get('required_skills', [])
+                        mgr = assignment['manager']
+                        new_load = mgr.get('Количество обращений в работе', 0) + 1
+                        for j, m in enumerate(MANAGERS):
+                            if m['ФИО'] == mgr['ФИО']:
+                                MANAGERS[j]['Количество обращений в работе'] = new_load
+                                break
+                        await update_manager_load_in_db(mgr['ФИО'], new_load)
+                    
+                    ticket_store.add(new_ticket)
+                    await save_ticket_to_db(new_ticket)
+                    processed += 1
+                    print(f"  ✅ {enriched.get('ticket_type','?')} | p={enriched.get('priority','?')} | → {new_ticket.get('assigned_manager','—')}")
+                except Exception as e:
+                    errors += 1
+                    print(f"  ❌ Ошибка: {e}")
+                    
+            await asyncio.sleep(8) # Пауза в 8 секунд между батчами, чтобы гарантированно не пробить квоту в 15 запросов/мин
         
         return {"success": True, "processed": processed, "total": len(raw_tickets), "errors": errors}
     except Exception as e:
