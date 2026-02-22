@@ -1,14 +1,18 @@
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
+import csv
+from io import StringIO
 import heapq
 from enum import Enum
 import httpx
 import json
 import asyncio
+import chardet
 import re
 import math
 import random
@@ -790,6 +794,25 @@ class TicketStore:
 ticket_store = TicketStore()
 app = FastAPI(title="Smart Assignment Engine", version="1.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Next.js default port
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # OPTIONS обязателен
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+    ],
+)
+
 @app.post("/api/tickets", response_model=TicketResponse)
 async def create_ticket(ticket: TicketCreate):
     ticket_id = str(uuid.uuid4())
@@ -998,6 +1021,386 @@ async def get_round_robin_stats():
             }
     
     return result
+
+# Добавьте эти эндпоинты в main.py после существующих
+
+@app.get("/api/managers", response_model=List[Dict[str, Any]])
+async def get_all_managers():
+    """Получить список всех менеджеров"""
+    return MANAGERS
+
+@app.get("/api/managers/{manager_id}", response_model=Dict[str, Any])
+async def get_manager_by_id(manager_id: str):
+    """Получить менеджера по ID (фио)"""
+    for manager in MANAGERS:
+        if manager.get('ФИО') == manager_id or manager.get('id') == manager_id:
+            return manager
+    raise HTTPException(status_code=404, detail="Manager not found")
+
+@app.get("/api/managers/load", response_model=List[Dict[str, Any]])
+async def get_managers_load():
+    """Получить загрузку менеджеров"""
+    return [
+        {
+            "managerId": m.get('ФИО'),
+            "load": m.get('Количество обращений в работе', 0)
+        }
+        for m in MANAGERS
+    ]
+
+@app.get("/api/business-units", response_model=List[Dict[str, Any]])
+async def get_business_units():
+    """Получить список всех офисов"""
+    return BUSINESS_UNITS
+
+@app.get("/api/geo-data")
+async def get_geo_data():
+    """Получить геоданные для тикетов"""
+    tickets = ticket_store.list()
+    geo_data = []
+    
+    for ticket in tickets:
+        enriched = ticket.get('enriched_data', {})
+        coords = enriched.get('coordinates')
+        if coords:
+            geo_data.append({
+                "ticketId": ticket['id'],
+                "coordinates": [coords.get('lat', 0), coords.get('lon', 0)],
+                "type": ticket.get('ticket_type', 'unknown'),
+                "priority": ticket.get('priority', 'medium')
+            })
+    
+    return geo_data
+
+# Добавьте Pydantic модель для DashboardFilters, если её нет
+class DashboardFilters(BaseModel):
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    office: Optional[str] = None
+    priority: Optional[str] = None
+    type: Optional[str] = None
+
+@app.post("/api/tickets/upload")
+async def upload_csv(file: UploadFile = File(...)):
+    """Загрузка CSV файла с данными"""
+    try:
+        # Читаем файл с определением кодировки
+        contents = await file.read()
+        
+        # Определяем кодировку
+        encoding_result = chardet.detect(contents)
+        encoding = encoding_result['encoding'] or 'utf-8'
+        print(f"📄 Определена кодировка файла: {encoding}")
+        
+        # Декодируем содержимое
+        csv_data = contents.decode(encoding, errors='ignore')
+        
+        # Пробуем разные разделители
+        delimiters = [',', ';', '\t', '|']
+        csv_reader = None
+        used_delimiter = None
+        
+        # Проверяем начало файла для определения разделителя
+        sample = csv_data[:1000]
+        
+        for delimiter in delimiters:
+            try:
+                reader = csv.DictReader(StringIO(sample), delimiter=delimiter)
+                # Пробуем прочитать первую строку
+                next(reader)
+                csv_reader = csv.DictReader(StringIO(csv_data), delimiter=delimiter)
+                used_delimiter = delimiter
+                print(f"📊 Используется разделитель: '{delimiter}'")
+                break
+            except:
+                continue
+        
+        if not csv_reader:
+            # Если ничего не подошло, используем стандартный с автоопределением
+            csv_reader = csv.DictReader(StringIO(csv_data))
+            used_delimiter = 'auto'
+            print(f"📊 Используется автоопределение разделителя")
+        
+        tickets_created = 0
+        managers_updated = 0
+        business_units_updated = 0
+        
+        # Приводим названия колонок к нижнему регистру и убираем пробелы
+        fieldnames = [col.strip().lower() for col in csv_reader.fieldnames]
+        print(f"📋 Найдены колонки: {fieldnames}")
+        
+        rows = list(csv_reader)
+        print(f"📊 Всего строк в CSV: {len(rows)}")
+        
+        for i, row in enumerate(rows):
+            try:
+                # Приводим ключи к нижнему регистру
+                row_lower = {k.strip().lower(): v for k, v in row.items()}
+                
+                # Проверяем, есть ли обязательные поля для разных типов данных
+                has_client_fields = any(k in row_lower for k in ['client_guid', 'clientguid', 'client guid', 'guid'])
+                has_description = any(k in row_lower for k in ['description', 'описание', 'text', 'текст'])
+                has_manager_fields = any(k in row_lower for k in ['фио', 'fio', 'fullname', 'name'])
+                has_unit_fields = any(k in row_lower for k in ['офис', 'office', 'businessunit', 'business unit'])
+                
+                if has_client_fields or has_description:
+                    # Это тикет - вызываем вспомогательную функцию
+                    ticket = await process_csv_ticket_row(row_lower)  # 👈 await здесь обязателен!
+                    if ticket:
+                        ticket_store.add(ticket)
+                        tickets_created += 1
+                        print(f"  ✅ Создан тикет {i+1}: {ticket.get('id')}")
+                
+                elif has_manager_fields:
+                    # Это менеджер
+                    manager = process_csv_manager_row(row_lower)
+                    if manager:
+                        # Обновляем или добавляем менеджера
+                        found = False
+                        for j, m in enumerate(MANAGERS):
+                            if m['ФИО'] == manager['ФИО']:
+                                MANAGERS[j] = manager
+                                found = True
+                                break
+                        
+                        if not found:
+                            MANAGERS.append(manager)
+                        
+                        managers_updated += 1
+                        print(f"  ✅ Обновлен менеджер {i+1}: {manager.get('ФИО')}")
+                
+                elif has_unit_fields:
+                    # Это офис
+                    unit = process_csv_unit_row(row_lower)
+                    if unit:
+                        # Обновляем или добавляем офис
+                        found = False
+                        for j, u in enumerate(BUSINESS_UNITS):
+                            if u['Офис'] == unit['Офис']:
+                                BUSINESS_UNITS[j] = unit
+                                found = True
+                                break
+                        
+                        if not found:
+                            BUSINESS_UNITS.append(unit)
+                        
+                        business_units_updated += 1
+                        print(f"  ✅ Обновлен офис {i+1}: {unit.get('Офис')}")
+            
+            except Exception as e:
+                print(f"❌ Ошибка обработки строки {i+1}: {e}")
+                continue
+        
+        # Переинициализируем Round Robin очереди после обновления менеджеров
+        if managers_updated > 0:
+            initialize_round_robin_queues()
+            print("🔄 Round Robin очереди переинициализированы")
+        
+        result = {
+            "success": True,
+            "message": f"Загружено: {tickets_created} тикетов, {managers_updated} менеджеров, {business_units_updated} офисов",
+            "ticketsCount": tickets_created,
+            "managersCount": managers_updated,
+            "businessUnitsCount": business_units_updated
+        }
+        
+        print("✅ CSV загрузка завершена:", result)
+        return result
+        
+    except Exception as e:
+        print(f"❌ Ошибка при загрузке CSV: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Ошибка при загрузке CSV: {str(e)}")
+
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ CSV (ДОБАВЬТЕ ПОСЛЕ ЭНДПОИНТА) ==========
+
+async def process_csv_ticket_row(row: dict) -> Optional[Dict[str, Any]]:
+    """Обработка строки CSV как тикета"""
+    try:
+        # Ищем нужные поля
+        client_guid = (
+            row.get('client_guid') or 
+            row.get('clientguid') or 
+            row.get('client guid') or 
+            row.get('guid') or 
+            str(uuid.uuid4())
+        )
+        
+        description = (
+            row.get('description') or 
+            row.get('описание') or 
+            row.get('text') or 
+            row.get('текст') or 
+            ''
+        )
+        
+        segment = (
+            row.get('segment') or 
+            row.get('сегмент') or 
+            'Mass'
+        )
+        
+        address = (
+            row.get('address') or 
+            row.get('адрес') or 
+            row.get('fulladdress') or 
+            ''
+        )
+        
+        if not description:
+            return None
+        
+        # Обогащаем данные через AI
+        enriched = await ai_client.enrich(
+            text=description,
+            address=address
+        )
+        
+        now = datetime.now()
+        
+        new_ticket = {
+            "id": str(uuid.uuid4()),
+            "client_guid": client_guid,
+            "description": description,
+            "segment": segment,
+            "address": address,
+            "attachments": [],
+            "status": TicketStatus.NEW,
+            "priority": enriched.get("priority", TicketPriority.MEDIUM),
+            "ticket_type": enriched.get("ticket_type", TicketType.CONSULTATION),
+            "summary": enriched.get("summary", ""),
+            "sentiment": enriched.get("sentiment", "neutral"),
+            "language": enriched.get("language", "ru"),
+            "is_spam": enriched.get("is_spam", False),
+            "suggested_action": enriched.get("suggested_action", "standard_review"),
+            "assigned_manager": None,
+            "assigned_office": None,
+            "assignment_reason": None,
+            "distance_to_office": None,
+            "required_skills": None,
+            "created_at": now,
+            "updated_at": now,
+            "enriched_data": enriched
+        }
+        
+        # Назначаем менеджера
+        manager_assignment = find_best_manager_for_ticket(
+            ticket_data={
+                "segment": segment,
+                "address": address
+            },
+            enriched_data=enriched
+        )
+        
+        if manager_assignment:
+            new_ticket["assigned_manager"] = manager_assignment['manager']['ФИО']
+            new_ticket["assigned_office"] = manager_assignment['office']['Офис']
+            new_ticket["assignment_reason"] = manager_assignment['reason']
+            new_ticket["distance_to_office"] = manager_assignment['office'].get('distance_km')
+            new_ticket["required_skills"] = manager_assignment.get('required_skills', [])
+            
+            # Обновляем нагрузку менеджера
+            for i, m in enumerate(MANAGERS):
+                if m['ФИО'] == manager_assignment['manager']['ФИО']:
+                    MANAGERS[i]['Количество обращений в работе'] = \
+                        MANAGERS[i].get('Количество обращений в работе', 0) + 1
+                    break
+        
+        return new_ticket
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки тикета: {e}")
+        return None
+
+def process_csv_manager_row(row: dict) -> Optional[Dict[str, Any]]:
+    """Обработка строки CSV как менеджера"""
+    try:
+        fio = (
+            row.get('фио') or 
+            row.get('fio') or 
+            row.get('fullname') or 
+            row.get('name') or 
+            ''
+        )
+        
+        if not fio:
+            return None
+        
+        position = (
+            row.get('должность') or 
+            row.get('position') or 
+            row.get('role') or 
+            'Специалист'
+        )
+        
+        # Обработка навыков (могут быть строкой через запятую или список)
+        skills_raw = row.get('навыки') or row.get('skills') or ''
+        if isinstance(skills_raw, str):
+            skills = [s.strip() for s in skills_raw.split(',') if s.strip()]
+        else:
+            skills = skills_raw or []
+        
+        office = (
+            row.get('офис') or 
+            row.get('office') or 
+            row.get('businessunit') or 
+            row.get('business unit') or 
+            'Астана'
+        )
+        
+        load = 0
+        load_val = row.get('количество обращений в работе') or row.get('load') or row.get('currentload')
+        if load_val:
+            try:
+                load = int(float(str(load_val).strip()))
+            except:
+                load = 0
+        
+        return {
+            "ФИО": fio,
+            "Должность ": position,
+            "Навыки": skills,
+            "Офис": office,
+            "Количество обращений в работе": load
+        }
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки менеджера: {e}")
+        return None
+
+def process_csv_unit_row(row: dict) -> Optional[Dict[str, Any]]:
+    """Обработка строки CSV как офиса"""
+    try:
+        office = (
+            row.get('офис') or 
+            row.get('office') or 
+            row.get('businessunit') or 
+            row.get('business unit') or 
+            row.get('name') or 
+            ''
+        )
+        
+        if not office:
+            return None
+        
+        address = (
+            row.get('адрес') or 
+            row.get('address') or 
+            ''
+        )
+        
+        return {
+            "Офис": office,
+            "Адрес": address,
+            "coordinates": get_city_coordinates(office)
+        }
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки офиса: {e}")
+        return None
+
+    
 
 @app.on_event("startup")
 async def startup_event():

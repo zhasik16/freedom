@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Ticket, Manager, BusinessUnitOffice, DashboardFilters } from '../types';
 import { ticketsApi, managersApi, businessUnitsApi } from '../api/endpoints';
-import { loadAllData } from '../utils/csvLoader';
 
 interface DatasetState {
   tickets: Ticket[];
@@ -10,7 +9,7 @@ interface DatasetState {
   filteredTickets: Ticket[];
   loading: boolean;
   error: string | null;
-  useBackend: boolean;
+  useBackend: boolean;  // 👈 Добавляем поле
 }
 
 export function useDataset(filters?: DashboardFilters) {
@@ -21,13 +20,15 @@ export function useDataset(filters?: DashboardFilters) {
     filteredTickets: [],
     loading: true,
     error: null,
-    useBackend: false
+    useBackend: true  // 👈 По умолчанию true
   });
 
   const loadFromBackend = useCallback(async () => {
     try {
+      setState(prev => ({ ...prev, loading: true, error: null, useBackend: true }));
+      
       const [tickets, managers, units] = await Promise.all([
-        ticketsApi.getAll(filters),
+        ticketsApi.getAll(filters?.skip, filters?.limit),
         managersApi.getAll(),
         businessUnitsApi.getAll()
       ]);
@@ -41,89 +42,44 @@ export function useDataset(filters?: DashboardFilters) {
         error: null,
         useBackend: true
       });
-    } catch (error) {
-      console.log('Backend unavailable, falling back to CSV...');
-      // Если бэкенд недоступен, грузим из CSV
-      const csvData = await loadAllData();
-      setState({
-        tickets: csvData.tickets,
-        managers: csvData.managers,
-        businessUnits: csvData.businessUnits,
-        filteredTickets: csvData.tickets,
-        loading: false,
-        error: null,
-        useBackend: false
+
+      console.log('✅ Данные успешно загружены с бэкенда:', {
+        tickets: tickets.length,
+        managers: managers.length,
+        units: units.length
       });
+    } catch (error) {
+      console.error('❌ Ошибка загрузки с бэкенда:', error);
+      // Если бэкенд недоступен, пробуем загрузить из CSV (если есть такие данные)
+      try {
+        // Здесь можно добавить загрузку из локальных CSV если нужно
+        setState({
+          tickets: [],
+          managers: [],
+          businessUnits: [],
+          filteredTickets: [],
+          loading: false,
+          error: null,
+          useBackend: false
+        });
+      } catch {
+        setState({
+          tickets: [],
+          managers: [],
+          businessUnits: [],
+          filteredTickets: [],
+          loading: false,
+          error: error instanceof Error ? error.message : 'Ошибка подключения к бэкенду',
+          useBackend: false
+        });
+      }
     }
   }, [filters]);
 
-  const loadFromCSV = useCallback(async () => {
-    const data = await loadAllData();
-    setState({
-      tickets: data.tickets,
-      managers: data.managers,
-      businessUnits: data.businessUnits,
-      filteredTickets: data.tickets,
-      loading: false,
-      error: null,
-      useBackend: false
-    });
-  }, []);
-
+  // Загрузка при монтировании и изменении фильтров
   useEffect(() => {
-    setState(prev => ({ ...prev, loading: true }));
-    
-    // Пробуем загрузить с бэкенда, если не получится - грузим из CSV
-    loadFromBackend().catch(() => loadFromCSV());
-  }, [loadFromBackend, loadFromCSV]);
-
-  // Применение фильтров
-  useEffect(() => {
-    if (!filters) return;
-
-    if (state.useBackend) {
-      // Если используем бэкенд, перезагружаем с фильтрами
-      loadFromBackend();
-    } else {
-      // Если используем CSV, фильтруем локально
-      let filtered = [...state.tickets];
-      
-      if (filters.businessUnit?.length) {
-        filtered = filtered.filter(t => 
-          t.businessUnit && filters.businessUnit?.includes(t.businessUnit)
-        );
-      }
-      if (filters.ticketType?.length) {
-        filtered = filtered.filter(t => 
-          t.aiAnalysis && filters.ticketType?.includes(t.aiAnalysis.type)
-        );
-      }
-      if (filters.segment?.length) {
-        filtered = filtered.filter(t => 
-          filters.segment?.includes(t.segment)
-        );
-      }
-      if (filters.priorityMin !== undefined) {
-        filtered = filtered.filter(t => 
-          t.aiAnalysis && t.aiAnalysis.priority >= (filters.priorityMin || 1)
-        );
-      }
-      if (filters.priorityMax !== undefined) {
-        filtered = filtered.filter(t => 
-          t.aiAnalysis && t.aiAnalysis.priority <= (filters.priorityMax || 10)
-        );
-      }
-      if (filters.searchQuery) {
-        const query = filters.searchQuery.toLowerCase();
-        filtered = filtered.filter(t => 
-          t.description.toLowerCase().includes(query) ||
-          t.address.city?.toLowerCase().includes(query)
-        );
-      }
-
-      setState(prev => ({ ...prev, filteredTickets: filtered }));
-    }
-  }, [filters, state.useBackend, state.tickets, loadFromBackend]);
+    loadFromBackend();
+  }, [loadFromBackend]);
 
   const stats = {
     totalTickets: state.tickets.length,
@@ -137,8 +93,14 @@ export function useDataset(filters?: DashboardFilters) {
   };
 
   return {
-    ...state,
+    tickets: state.tickets,
+    managers: state.managers,
+    businessUnits: state.businessUnits,
+    filteredTickets: state.filteredTickets,
+    loading: state.loading,
+    error: state.error,
+    useBackend: state.useBackend,  
     stats,
-    refresh: state.useBackend ? loadFromBackend : loadFromCSV
+    refresh: loadFromBackend
   };
 }

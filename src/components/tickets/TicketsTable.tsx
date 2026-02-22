@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Ticket } from "@/lib/types";
 import TicketModal from "./TicketModal";
 import {
@@ -16,11 +16,50 @@ interface Props {
 export default function TicketsTable({ tickets }: Props) {
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
 
+  // Генерируем гарантированно уникальные ключи
+  const ticketsWithUniqueKeys = useMemo(() => {
+    return tickets.map((ticket, index) => {
+      // Создаем уникальный ключ на основе нескольких параметров
+      const uniqueKey = `${ticket.id || "no-id"}-${ticket.clientGuid || "no-guid"}-${index}-${Date.now()}`;
+      return { ...ticket, uniqueKey };
+    });
+  }, [tickets]);
+
   const getPriorityColor = (priority: number) => {
     if (priority >= 8) return "bg-red-100 text-red-800";
     if (priority >= 5) return "bg-yellow-100 text-yellow-800";
     return "bg-green-100 text-green-800";
   };
+
+  const getSegmentClass = (segment: string) => {
+    switch (segment) {
+      case "VIP":
+        return "bg-purple-100 text-purple-800";
+      case "Priority":
+        return "bg-red-100 text-red-800";
+      default:
+        return "bg-gray-100 text-gray-800";
+    }
+  };
+
+  const getSentimentClass = (sentiment: string) => {
+    switch (sentiment) {
+      case "positive":
+        return "bg-green-100 text-green-800";
+      case "negative":
+        return "bg-red-100 text-red-800";
+      default:
+        return "bg-yellow-100 text-yellow-800";
+    }
+  };
+
+  if (tickets.length === 0) {
+    return (
+      <div className="text-center py-8 text-gray-500">
+        Нет обращений для отображения
+      </div>
+    );
+  }
 
   return (
     <>
@@ -49,27 +88,29 @@ export default function TicketsTable({ tickets }: Props) {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Приоритет
               </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"></th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Действия
+              </th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {tickets.map((ticket) => (
-              <tr key={ticket.id} className="hover:bg-gray-50">
-                <td className="px-6 py-4 whitespace-nowrap text-sm font-mono">
-                  {ticket.id.slice(0, 8)}...
+            {ticketsWithUniqueKeys.map((ticket) => (
+              <tr
+                key={ticket.uniqueKey}
+                className="hover:bg-gray-50 cursor-pointer"
+                onClick={() => setSelectedTicket(ticket)}
+              >
+                <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-900">
+                  {ticket.id ? ticket.id.slice(0, 8) + "..." : "N/A"}
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                  {ticket.clientGuid.slice(0, 8)}...
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  {ticket.clientGuid
+                    ? ticket.clientGuid.slice(0, 8) + "..."
+                    : "N/A"}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <span
-                    className={`badge ${
-                      ticket.segment === "VIP"
-                        ? "bg-purple-100 text-purple-800"
-                        : ticket.segment === "Priority"
-                          ? "bg-red-100 text-red-800"
-                          : "bg-gray-100 text-gray-800"
-                    }`}
+                    className={`px-2 py-1 text-xs font-semibold rounded-full ${getSegmentClass(ticket.segment)}`}
                   >
                     {SEGMENT_LABELS[ticket.segment]}
                   </span>
@@ -82,13 +123,7 @@ export default function TicketsTable({ tickets }: Props) {
                 <td className="px-6 py-4 whitespace-nowrap">
                   {ticket.aiAnalysis && (
                     <span
-                      className={`badge ${
-                        ticket.aiAnalysis.sentiment === "positive"
-                          ? "bg-green-100 text-green-800"
-                          : ticket.aiAnalysis.sentiment === "negative"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-yellow-100 text-yellow-800"
-                      }`}
+                      className={`px-2 py-1 text-xs font-semibold rounded-full ${getSentimentClass(ticket.aiAnalysis.sentiment)}`}
                     >
                       {SENTIMENT_LABELS[ticket.aiAnalysis.sentiment]}
                     </span>
@@ -100,16 +135,19 @@ export default function TicketsTable({ tickets }: Props) {
                 <td className="px-6 py-4 whitespace-nowrap">
                   {ticket.aiAnalysis && (
                     <span
-                      className={`badge ${getPriorityColor(ticket.aiAnalysis.priority)}`}
+                      className={`px-2 py-1 text-xs font-semibold rounded-full ${getPriorityColor(ticket.aiAnalysis.priority)}`}
                     >
                       {ticket.aiAnalysis.priority}/10
                     </span>
                   )}
                 </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   <button
-                    onClick={() => setSelectedTicket(ticket)}
-                    className="text-blue-600 hover:text-blue-900"
+                    className="text-blue-600 hover:text-blue-800"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedTicket(ticket);
+                    }}
                   >
                     Детали
                   </button>

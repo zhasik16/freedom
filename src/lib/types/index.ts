@@ -32,7 +32,7 @@ export type BusinessUnit = string;
 export interface AITicketAnalysis {
   type: TicketType;
   sentiment: Sentiment;
-  priority: number;
+  priority: number; // 1 - urgent, 2 - high, 3 - medium, 4 - low
   language: Language;
   summary: string;
   recommendedAction: string;
@@ -68,7 +68,7 @@ export interface BusinessUnitOffice {
   id: string;
   name: BusinessUnit;
   address: Address;
-  managers: string[];
+  managers: string[]; // IDs of managers
 }
 
 export interface DashboardFilters {
@@ -81,6 +81,8 @@ export interface DashboardFilters {
   priorityMax?: number;
   searchQuery?: string;
   assigned?: boolean;
+  skip?: number;
+  limit?: number;
 }
 
 export interface DashboardAnalytics {
@@ -115,7 +117,6 @@ export interface AIQueryResponse {
   };
 }
 
-// Добавленный интерфейс
 export interface CSVUploadResponse {
   success: boolean;
   message: string;
@@ -124,7 +125,7 @@ export interface CSVUploadResponse {
   businessUnitsCount?: number;
 }
 
-// Константы
+// Константы для отображения на русском языке
 export const TICKET_TYPE_LABELS: Record<TicketType, string> = {
   complaint: 'Жалоба',
   data_change: 'Смена данных',
@@ -151,4 +152,68 @@ export const SEGMENT_LABELS: Record<Segment, string> = {
   Mass: 'Массовый',
   VIP: 'VIP',
   Priority: 'Приоритетный'
+};
+
+export const MANAGER_POSITION_LABELS: Record<ManagerPosition, string> = {
+  'Специалист': 'Специалист',
+  'Ведущий специалист': 'Ведущий специалист',
+  'Главный специалист': 'Главный специалист'
+};
+
+export const MANAGER_SKILL_LABELS: Record<ManagerSkill, string> = {
+  'VIP': 'VIP клиенты',
+  'ENG': 'Английский язык',
+  'KZ': 'Казахский язык'
+};
+
+// Функции-хелперы для работы с типами
+export const getTicketTypeFromString = (type: string): TicketType => {
+  const map: Record<string, TicketType> = {
+    'Жалоба': 'complaint',
+    'Смена данных': 'data_change',
+    'Консультация': 'consultation',
+    'Претензия': 'claim',
+    'Неработоспособность приложения': 'app_not_working',
+    'Мошеннические действия': 'fraud',
+    'Спам': 'spam'
+  };
+  return map[type] || 'consultation';
+};
+
+export const getLanguageFromString = (lang: string): Language => {
+  const map: Record<string, Language> = {
+    'ru': 'RU',
+    'kz': 'KZ',
+    'en': 'ENG'
+  };
+  return map[lang] || 'RU';
+};
+
+export const getSegmentFromString = (segment: string): Segment => {
+  const map: Record<string, Segment> = {
+    'VIP': 'VIP',
+    'Priority': 'Priority',
+    'Mass': 'Mass'
+  };
+  return map[segment] || 'Mass';
+};
+
+export const getPriorityNumber = (priority: string): number => {
+  const map: Record<string, number> = {
+    'urgent': 1,
+    'high': 2,
+    'medium': 3,
+    'low': 4
+  };
+  return map[priority] || 3;
+};
+
+export const getPriorityString = (priority: number): string => {
+  const map: Record<number, string> = {
+    1: 'urgent',
+    2: 'high',
+    3: 'medium',
+    4: 'low'
+  };
+  return map[priority] || 'medium';
 };
