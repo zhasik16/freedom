@@ -610,9 +610,24 @@ class GoogleAIClient:
             ticket_type = "Консультация"
         
         if forced_priority is not None:
-            priority = forced_priority
+            priority = int(forced_priority)
         else:
-            priority = self.detect_priority_keywords(text) or 5
+            base_prio = {
+                "Спам": 10,
+                "Мошеннические действия": 2,
+                "Смена данных": 6,
+                "Неработоспособность приложения": 3,
+                "Жалоба": 4,
+                "Претензия": 2,
+                "Консультация": 8
+            }.get(ticket_type, 5)
+            
+            offset = (len(text) % 5) - 2 # Gives -2, -1, 0, 1, 2
+            priority = max(1, min(10, base_prio + offset))
+            
+            keyword_prio = self.detect_priority_keywords(text)
+            if keyword_prio:
+                priority = min(priority, keyword_prio)
         
         if forced_lang:
             language = forced_lang
