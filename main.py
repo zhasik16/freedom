@@ -1474,11 +1474,18 @@ async def process_csv_ticket_row(row: dict) -> Optional[Dict[str, Any]]:
             'Mass'
         )
         
+        address_parts = []
+        if row.get('населённый пункт'): address_parts.append(row['населённый пункт'])
+        if row.get('улица'): address_parts.append(row['улица'])
+        if row.get('дом'): address_parts.append("д." + row['дом'])
+        if row.get('область'): address_parts.append(row['область'])
+        if row.get('страна'): address_parts.append(row['страна'])
+
         address = (
             row.get('address') or 
             row.get('адрес') or 
             row.get('fulladdress') or 
-            ''
+            (", ".join(address_parts) if address_parts else '')
         )
         
         if not description:
