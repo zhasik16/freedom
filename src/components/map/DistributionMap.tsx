@@ -1,30 +1,6 @@
 import { useState } from "react";
 import { Ticket } from "@/lib/types";
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
-// Simplified GeoJSON object for Kazakhstan boundaries injected directly
-// Note: Due to your network blocking GitHub and HighCharts JSON files with 404/403, 
-// we inject the boundary topology directly to make the map render offline.
-const kazakhstanGeoJson = {
-  type: "FeatureCollection",
-  features: [
-    {
-      type: "Feature",
-      geometry: {
-        type: "Polygon",
-        // A highly simplified approximation of Kazakhstan to guarantee it renders cleanly without heavy JSONs
-        coordinates: [
-          [
-            [46.5, 47.0], [50.0, 51.5], [60.0, 54.0], [70.0, 55.0], [77.0, 53.0], [87.0, 49.0],
-            [85.0, 46.5], [80.0, 44.5], [78.0, 42.5], [70.0, 41.5], [68.0, 40.5], [60.0, 45.0],
-            [54.0, 42.0], [51.0, 44.0], [46.5, 47.0]
-          ]
-        ]
-      },
-      properties: { name: "Kazakhstan" },
-      rsmKey: "kz-01"
-    }
-  ]
-};
 
 interface Props {
   tickets: Ticket[];
@@ -121,7 +97,7 @@ export default function DistributionMap({ tickets }: Props) {
           }}
           style={{ width: "100%", height: "100%", maxWidth: "800px" }}
         >
-          <Geographies geography={kazakhstanGeoJson}>
+          <Geographies geography="/kazakhstan.json">
             {({ geographies }: { geographies: any[] }) =>
               geographies.map((geo: any) => (
                 <Geography

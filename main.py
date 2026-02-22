@@ -473,15 +473,17 @@ class GoogleAIClient:
         
         return None
     
-    async def enrich(self, text: str, address: str = None) -> Dict[str, Any]:
-        """Обогащение данных через Google Gemini API"""
+    async def enrich(self, text: str, address: str = None, image_paths: List[str] = None) -> Dict[str, Any]:
+        """Обогащение данных через Google Gemini API с поддержкой изображений"""
+        import base64
+        import mimetypes
         try:
             priority_hint = self.detect_priority_keywords(text)
             simple_lang = self.detect_language_simple(text)
             
             prompt = f"""Ты - AI ассистент для обработки обращений в службу поддержки финансовой компании в Казахстане.
 
-Проанализируй текст обращения клиента и верни ТОЛЬКО JSON без дополнительного текста.
+Проанализируй текст обращения клиента(и возможные скриншоты) и верни ТОЛЬКО JSON без дополнительного текста.
 
 Тип обращения (строго из списка):
 - Жалоба: клиент недоволен, жалуется на сервис
@@ -519,6 +521,24 @@ class GoogleAIClient:
         
             if address:
                 prompt += f"\nАдрес клиента: {address}"
+
+            parts = [{"text": prompt}]
+
+            if image_paths:
+                for img_path in image_paths:
+                    import os
+                    if os.path.exists(img_path):
+                        with open(img_path, "rb") as image_file:
+                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                            mime_type, _ = mimetypes.guess_type(img_path)
+                            if not mime_type:
+                                mime_type = "image/png"
+                            parts.append({
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": encoded_string
+                                }
+                            })
             
             last_error = ""
             for model_name in AI_MODELS:
@@ -529,7 +549,7 @@ class GoogleAIClient:
                             params={"key": self.api_key},
                             json={
                                 "contents": [{
-                                    "parts": [{"text": prompt}]
+                                    "parts": parts
                                 }],
                                 "generationConfig": {
                                     "temperature": 0.1,
@@ -553,8 +573,8 @@ class GoogleAIClient:
                         result = response.json()
                         candidate = result.get("candidates", [{}])[0]
                         content = candidate.get("content", {})
-                        parts = content.get("parts", [{}])
-                        response_text = parts[0].get("text", "{}")
+                        resp_parts = content.get("parts", [{}])
+                        response_text = resp_parts[0].get("text", "{}")
                         
                         response_text = response_text.replace("```json", "").replace("```", "").strip()
                         enriched_data = json.loads(response_text)
@@ -575,13 +595,14 @@ class GoogleAIClient:
                         
                         summary = enriched_data.get("summary", "")
                         if "рекомендация" not in summary.lower():
-                            priority = enriched_data.get("priority", "medium")
-                            if priority == "urgent":
-                                enriched_data["summary"] = summary + " Рекомендация: срочно связаться"
-                            elif priority == "high":
-                                enriched_data["summary"] = summary + " Рекомендация: приоритетно"
-                            else:
-                                enriched_data["summary"] = summary + " Рекомендация: стандартно"
+                            priority_val = enriched_data.get("priority", 5)
+                            if isinstance(priority_val, int):
+                                if priority_val <= 2:
+                                    enriched_data["summary"] = summary + " Рекомендация: срочно связаться"
+                                elif priority_val <= 4:
+                                    enriched_data["summary"] = summary + " Рекомендация: приоритетно"
+                                else:
+                                    enriched_data["summary"] = summary + " Рекомендация: стандартно"
                         
                         if address and "coordinates" not in enriched_data:
                             enriched_data["coordinates"] = get_address_coordinates(address)
