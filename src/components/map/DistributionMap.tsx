@@ -1,7 +1,30 @@
-"use client";
-
 import { useState } from "react";
 import { Ticket } from "@/lib/types";
+import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
+// Simplified GeoJSON object for Kazakhstan boundaries injected directly
+// Note: Due to your network blocking GitHub and HighCharts JSON files with 404/403, 
+// we inject the boundary topology directly to make the map render offline.
+const kazakhstanGeoJson = {
+  type: "FeatureCollection",
+  features: [
+    {
+      type: "Feature",
+      geometry: {
+        type: "Polygon",
+        // A highly simplified approximation of Kazakhstan to guarantee it renders cleanly without heavy JSONs
+        coordinates: [
+          [
+            [46.5, 47.0], [50.0, 51.5], [60.0, 54.0], [70.0, 55.0], [77.0, 53.0], [87.0, 49.0],
+            [85.0, 46.5], [80.0, 44.5], [78.0, 42.5], [70.0, 41.5], [68.0, 40.5], [60.0, 45.0],
+            [54.0, 42.0], [51.0, 44.0], [46.5, 47.0]
+          ]
+        ]
+      },
+      properties: { name: "Kazakhstan" },
+      rsmKey: "kz-01"
+    }
+  ]
+};
 
 interface Props {
   tickets: Ticket[];
@@ -10,15 +33,17 @@ interface Props {
 export default function DistributionMap({ tickets }: Props) {
   const [selectedCity, setSelectedCity] = useState<string | null>(null);
 
-  // Группировка по городам
+  // Group tickets by assigned city coordinate
   const cityGroups = tickets.reduce(
     (acc, t) => {
-      const city = t.address.city || "Неизвестно";
+      // Ищем город по назначенному офису из бэкенда
+      const city = t.businessUnit || t.address.city || "Неизвестно";
+
       if (!acc[city]) {
         acc[city] = {
           count: 0,
           tickets: [],
-          coordinates: t.address.coordinates || { lat: 43.2389, lng: 76.8897 }, // Алматы по умолчанию
+          coordinates: t.address.coordinates || { lat: 43.2389, lng: 76.8897 }, // fallback to Almaty
         };
       }
       acc[city].count++;
@@ -32,7 +57,7 @@ export default function DistributionMap({ tickets }: Props) {
         tickets: Ticket[];
         coordinates: { lat: number; lng: number };
       }
-    >,
+    >
   );
 
   if (tickets.length === 0) {
@@ -61,102 +86,170 @@ export default function DistributionMap({ tickets }: Props) {
     <div>
       {/* Статистика по городам */}
       <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-        {Object.entries(cityGroups).map(([city, data]) => (
-          <button
-            key={city}
-            onClick={() => setSelectedCity(selectedCity === city ? null : city)}
-            className={`p-3 rounded-lg border transition-all ${
-              selectedCity === city
-                ? "bg-blue-50 border-blue-500 shadow-md"
-                : "bg-gray-50 border-gray-200 hover:bg-gray-100"
-            }`}
-          >
-            <div className="font-medium">{city}</div>
-            <div className="text-sm text-gray-600">{data.count} обращений</div>
-            <div className="text-xs text-gray-400">
-              {data.tickets.filter((t) => t.segment === "VIP").length} VIP
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Карта */}
-      <div className="bg-gray-100 rounded-lg p-6 h-96 relative overflow-hidden">
-        {/* Сетка карты */}
-        <div
-          className="absolute inset-0"
-          style={{
-            backgroundImage:
-              "linear-gradient(#ddd 1px, transparent 1px), linear-gradient(90deg, #ddd 1px, transparent 1px)",
-            backgroundSize: "50px 50px",
-          }}
-        ></div>
-
-        {/* Маркеры городов */}
-        {Object.entries(cityGroups).map(([city, data]) => {
-          // Простая проекция для демо
-          const left = 20 + Math.random() * 60; // Случайная позиция для демо
-          const top = 20 + Math.random() * 60;
-
-          return (
-            <div
+        {Object.entries(cityGroups)
+          .sort((a, b) => b[1].count - a[1].count)
+          .slice(0, 8)
+          .map(([city, data]) => (
+            <button
               key={city}
-              className={`absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer transition-all ${
-                selectedCity && selectedCity !== city ? "opacity-30" : ""
-              }`}
-              style={{ left: `${left}%`, top: `${top}%` }}
-              onClick={() =>
-                setSelectedCity(selectedCity === city ? null : city)
-              }
+              onClick={() => setSelectedCity(selectedCity === city ? null : city)}
+              className={`p-3 rounded-lg border transition-all text-left ${selectedCity === city
+                ? "bg-blue-50 border-blue-500 shadow-md"
+                : "bg-white border-gray-200 hover:bg-gray-50"
+                }`}
             >
-              <div
-                className={`w-4 h-4 rounded-full ${
-                  data.count > 10
-                    ? "bg-red-500 w-6 h-6"
-                    : data.count > 5
-                      ? "bg-orange-500 w-5 h-5"
-                      : "bg-yellow-500"
-                } animate-pulse`}
-              />
-              <div className="absolute top-full left-1/2 transform -translate-x-1/2 mt-1 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-                {city}: {data.count}
+              <div className="font-semibold text-gray-800">{city}</div>
+              <div className="text-sm font-medium text-blue-600 mt-1">{data.count} обращений</div>
+              <div className="text-xs text-gray-400 mt-2 flex gap-2">
+                <span className="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">
+                  VIP: {data.tickets.filter((t) => t.segment === "VIP").length}
+                </span>
+                <span className="bg-red-100 text-red-700 px-1.5 py-0.5 rounded">
+                  Priority: {data.tickets.filter((t) => t.segment === "Priority").length}
+                </span>
               </div>
-            </div>
-          );
-        })}
+            </button>
+          ))}
       </div>
 
-      {/* Детали выбранного города */}
-      {selectedCity && cityGroups[selectedCity] && (
-        <div className="mt-6 p-4 bg-white rounded-lg border">
-          <h4 className="font-semibold mb-3">Обращения в {selectedCity}</h4>
-          <div className="space-y-2 max-h-60 overflow-y-auto">
-            {cityGroups[selectedCity].tickets.map((ticket) => (
-              <div
-                key={ticket.id}
-                className="text-sm p-2 bg-gray-50 rounded hover:bg-gray-100"
+      <div className="bg-[#f8f9fa] rounded-xl border border-gray-200 p-2 relative shadow-inner overflow-hidden flex justify-center items-center" style={{ height: '500px' }}>
+        <ComposableMap
+          projection="geoMercator"
+          projectionConfig={{
+            center: [68, 48], // В центр Казахстана
+            scale: 1400,
+          }}
+          style={{ width: "100%", height: "100%", maxWidth: "800px" }}
+        >
+          <Geographies geography={kazakhstanGeoJson}>
+            {({ geographies }: { geographies: any[] }) =>
+              geographies.map((geo: any) => (
+                <Geography
+                  key={geo.rsmKey}
+                  geography={geo}
+                  fill="#e5e7eb"
+                  stroke="#ffffff"
+                  strokeWidth={1.5}
+                  style={{
+                    default: { outline: "none" },
+                    hover: { fill: "#d1d5db", outline: "none" },
+                    pressed: { outline: "none" },
+                  }}
+                />
+              ))
+            }
+          </Geographies>
+
+          {/* Маркеры городов */}
+          {Object.entries(cityGroups).map(([city, data]) => {
+            const { lng, lat } = data.coordinates;
+            // Размер маркера зависит от числа тикетов (от 4 до 14)
+            const radius = Math.min(Math.max(4, data.count * 1.5), 14);
+            const isSelected = selectedCity === city;
+
+            return (
+              <Marker
+                key={city}
+                coordinates={[lng, lat]}
+                onClick={() => setSelectedCity(isSelected ? null : city)}
+                style={{ cursor: "pointer" }}
               >
-                <div className="flex justify-between">
-                  <span className="font-mono text-xs">
-                    {ticket.id.slice(0, 8)}
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-xs ${
-                      ticket.segment === "VIP"
-                        ? "bg-purple-100 text-purple-800"
-                        : ticket.segment === "Priority"
-                          ? "bg-red-100 text-red-800"
-                          : "bg-gray-100 text-gray-800"
-                    }`}
-                  >
-                    {ticket.segment}
-                  </span>
-                </div>
-                <p className="text-gray-600 mt-1 line-clamp-2">
-                  {ticket.description.substring(0, 100)}...
-                </p>
-              </div>
-            ))}
+                {/* Пульсирующий круг */}
+                <circle
+                  r={radius * 2}
+                  fill={isSelected ? "#3b82f6" : "#ef4444"}
+                  opacity={0.3}
+                  className="animate-ping"
+                  style={{ transformOrigin: "center", animationDuration: "2s" }}
+                />
+
+                {/* Основной маркер */}
+                <circle
+                  r={radius}
+                  fill={isSelected ? "#2563eb" : "#dc2626"}
+                  stroke="#ffffff"
+                  strokeWidth={2}
+                  className="transition-all duration-300"
+                />
+
+                <text
+                  textAnchor="middle"
+                  y={-radius - 6}
+                  style={{
+                    fontFamily: "system-ui",
+                    fill: "#1f2937",
+                    fontSize: isSelected ? "14px" : "12px",
+                    fontWeight: isSelected ? "700" : "500",
+                    pointerEvents: "none",
+                    textShadow: "1px 1px 2px white, -1px -1px 2px white, 1px -1px 2px white, -1px 1px 2px white"
+                  }}
+                >
+                  {city} ({data.count})
+                </text>
+              </Marker>
+            );
+          })}
+        </ComposableMap>
+      </div>
+
+      {/* Выбранный город (Детали) */}
+      {selectedCity && cityGroups[selectedCity] && (
+        <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-gray-50 border-b border-gray-200 px-6 py-4 flex justify-between items-center">
+            <h3 className="text-lg font-semibold text-gray-900">
+              Офис в г. {selectedCity}
+            </h3>
+            <span className="bg-blue-100 text-blue-800 text-sm font-medium px-3 py-1 rounded-full">
+              Всего тикетов: {cityGroups[selectedCity].count}
+            </span>
+          </div>
+
+          <div className="p-0 overflow-y-auto" style={{ maxHeight: '400px' }}>
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Сегмент & Тип</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Язык</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Суть обращения</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {cityGroups[selectedCity].tickets.map((ticket) => (
+                  <tr key={ticket.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
+                      {ticket.id.slice(0, 8)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex flex-col gap-1">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium w-fit ${ticket.segment === "VIP" ? "bg-purple-100 text-purple-800" :
+                          ticket.segment === "Priority" ? "bg-red-100 text-red-800" :
+                            "bg-gray-100 text-gray-800"
+                          }`}>
+                          {ticket.segment}
+                        </span>
+                        <span className="text-xs text-gray-600">
+                          {ticket.aiAnalysis?.type || "Консультация"}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${ticket.aiAnalysis?.language === 'KZ' ? 'bg-blue-50 border-blue-200 text-blue-700' :
+                        ticket.aiAnalysis?.language === 'ENG' ? 'bg-orange-50 border-orange-200 text-orange-700' :
+                          'bg-gray-50 border-gray-200 text-gray-700'
+                        }`}>
+                        {ticket.aiAnalysis?.language || "RU"}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-900 max-w-md">
+                      <div className="line-clamp-2" title={ticket.description}>
+                        {ticket.description}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

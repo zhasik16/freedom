@@ -1,6 +1,6 @@
 import { apiClient } from './client';
-import { 
-  Ticket, Manager, BusinessUnitOffice, DashboardAnalytics, 
+import {
+  Ticket, Manager, BusinessUnitOffice, DashboardAnalytics,
   DashboardFilters, AIQueryResponse, CSVUploadResponse,
   TicketType, Sentiment, Language, Segment, Address,
   Coordinates, AITicketAnalysis, ManagerPosition, ManagerSkill
@@ -34,7 +34,7 @@ const transformTicket = (backendTicket: any): Ticket => {
   };
 
   const enriched = backendTicket.enriched_data || {};
-  
+
   return {
     id: backendTicket.id,
     clientGuid: backendTicket.client_guid,
@@ -58,9 +58,9 @@ const transformTicket = (backendTicket: any): Ticket => {
     aiAnalysis: {
       type: ticketTypeMap[backendTicket.ticket_type] || 'consultation',
       sentiment: backendTicket.sentiment as Sentiment || 'neutral',
-      priority: backendTicket.priority === 'urgent' ? 1 : 
-                backendTicket.priority === 'high' ? 2 :
-                backendTicket.priority === 'medium' ? 3 : 4,
+      priority: typeof backendTicket.priority === 'number'
+        ? backendTicket.priority
+        : parseInt(backendTicket.priority as unknown as string, 10) || 5,
       language: languageMap[backendTicket.language] || 'RU',
       summary: backendTicket.summary || '',
       recommendedAction: backendTicket.suggested_action || ''
@@ -117,18 +117,18 @@ const transformBusinessUnit = (backendUnit: any): BusinessUnitOffice => {
 };
 
 export const ticketsApi = {
-  getAll: (skip?: number, limit?: number) => 
+  getAll: (skip?: number, limit?: number) =>
     apiClient.get<any[]>('/api/tickets', { skip, limit })
       .then(tickets => tickets.map(transformTicket)),
-  
-  getById: (id: string) => 
+
+  getById: (id: string) =>
     apiClient.get<any>(`/api/tickets/${id}`)
       .then(transformTicket),
-  
-  getNext: () => 
+
+  getNext: () =>
     apiClient.post<any>('/api/tickets/next')
       .then(transformTicket),
-  
+
   create: (ticketData: {
     client_guid: string;
     description: string;
@@ -136,15 +136,15 @@ export const ticketsApi = {
     address?: string;
     attachments?: string[];
   }) => apiClient.post<any>('/api/tickets', ticketData)
-      .then(transformTicket),
-  
+    .then(transformTicket),
 
-  upload: (file: File) => 
+
+  upload: (file: File) =>
     apiClient.uploadFile<CSVUploadResponse>('/api/tickets/upload', file),
 };
 
 export const managersApi = {
-  getAll: (businessUnit?: string) => 
+  getAll: (businessUnit?: string) =>
     apiClient.get<any[]>('/api/managers')
       .then(managers => {
         const transformed = managers.map(transformManager);
@@ -153,21 +153,21 @@ export const managersApi = {
         }
         return transformed;
       }),
-  
-  getById: (id: string) => 
+
+  getById: (id: string) =>
     apiClient.get<any>(`/api/managers/${id}`)
       .then(transformManager),
-  
-  getLoad: () => 
+
+  getLoad: () =>
     apiClient.get<{ managerId: string; load: number }[]>('/api/managers/load'),
 };
 
 export const businessUnitsApi = {
-  getAll: () => 
+  getAll: () =>
     apiClient.get<any[]>('/api/business-units')
       .then(units => units.map(transformBusinessUnit)),
-  
-  getNearbyOffices: (address: string) => 
+
+  getNearbyOffices: (address: string) =>
     apiClient.get<any>('/api/offices/nearby', { address })
       .then(data => ({
         client_coordinates: data.client_coordinates,
@@ -190,7 +190,7 @@ export const analyticsApi = {
       apiClient.get<any[]>('/api/tickets')
     ]).then(([assignments, offices, tickets]) => {
       const transformedTickets = tickets.map(transformTicket);
-      
+
       // Создаем distribution объекты
       const typeDistribution: Record<TicketType, number> = {
         complaint: 0,
@@ -201,27 +201,27 @@ export const analyticsApi = {
         fraud: 0,
         spam: 0
       };
-      
+
       const sentimentDistribution: Record<Sentiment, number> = {
         positive: 0,
         neutral: 0,
         negative: 0
       };
-      
+
       const languageDistribution: Record<Language, number> = {
         KZ: 0,
         ENG: 0,
         RU: 0
       };
-      
+
       const segmentDistribution: Record<Segment, number> = {
         Mass: 0,
         VIP: 0,
         Priority: 0
       };
-      
+
       const businessUnitDistribution: Record<string, number> = {};
-      
+
       // Заполняем распределения из данных assignments
       if (assignments) {
         // Маппинг из бэкенда в типы фронтенда
@@ -234,45 +234,45 @@ export const analyticsApi = {
           'Мошеннические действия': 'fraud',
           'Спам': 'spam'
         };
-        
+
         Object.entries(assignments.by_type || {}).forEach(([key, value]) => {
           const mappedKey = typeMap[key];
           if (mappedKey) typeDistribution[mappedKey] = value as number;
         });
-        
+
         Object.entries(assignments.by_priority || {}).forEach(([key, value]) => {
           if (key === 'urgent') sentimentDistribution.negative += value as number;
           else if (key === 'high') sentimentDistribution.negative += value as number * 0.5;
           else if (key === 'medium') sentimentDistribution.neutral += value as number;
           else sentimentDistribution.positive += value as number;
         });
-        
+
         Object.entries(assignments.by_office || {}).forEach(([key, value]) => {
           businessUnitDistribution[key] = value as number;
         });
       }
-      
+
       // Заполняем остальные распределения из тикетов
       transformedTickets.forEach(ticket => {
         if (ticket.aiAnalysis) {
-          languageDistribution[ticket.aiAnalysis.language] = 
+          languageDistribution[ticket.aiAnalysis.language] =
             (languageDistribution[ticket.aiAnalysis.language] || 0) + 1;
-          
-          segmentDistribution[ticket.segment] = 
+
+          segmentDistribution[ticket.segment] =
             (segmentDistribution[ticket.segment] || 0) + 1;
         }
       });
-      
+
       const dashboardData: DashboardAnalytics = {
         totalTickets: assignments?.total_tickets || transformedTickets.length,
-        avgPriority: transformedTickets.reduce((acc, t) => 
+        avgPriority: transformedTickets.reduce((acc, t) =>
           acc + (t.aiAnalysis?.priority || 3), 0) / (transformedTickets.length || 1),
         typeDistribution,
         sentimentDistribution,
         languageDistribution,
         segmentDistribution,
         businessUnitDistribution,
-        managerLoad: (offices || []).flatMap((office: any) => 
+        managerLoad: (offices || []).flatMap((office: any) =>
           (office.managers || []).map((m: any) => ({
             managerId: m.name,
             managerName: m.name,
@@ -296,12 +296,12 @@ export const analyticsApi = {
           return acc;
         }, {} as Record<string, number>)
       };
-      
+
       return dashboardData;
     });
   },
-  
-  getDistribution: (groupBy: string) => 
+
+  getDistribution: (groupBy: string) =>
     apiClient.get<any>('/api/stats/assignments').then(data => {
       const groupMap: Record<string, string> = {
         'priority': 'by_priority',
@@ -312,11 +312,11 @@ export const analyticsApi = {
         'skills': 'by_required_skills'
       };
       const key = groupMap[groupBy] || 'by_priority';
-      
+
       // Трансформируем ключи для фронтенда если нужно
       const result: Record<string, number> = {};
       const backendData = data[key] || {};
-      
+
       if (groupBy === 'type') {
         const typeMap: Record<string, string> = {
           'Жалоба': 'complaint',
@@ -334,10 +334,10 @@ export const analyticsApi = {
       } else {
         Object.assign(result, backendData);
       }
-      
+
       return result;
     }),
-  
+
   queryAI: (query: string, filters?: DashboardFilters) => {
     return Promise.resolve({
       type: 'text' as const,
@@ -353,22 +353,22 @@ export const analyticsApi = {
       }
     } as AIQueryResponse);
   },
-  
-  getGeoData: () => 
-    apiClient.get<any[]>('/api/geo-data').then(data => 
+
+  getGeoData: () =>
+    apiClient.get<any[]>('/api/geo-data').then(data =>
       data.map(item => ({
         ticketId: item.ticketId,
         coordinates: item.coordinates,
         type: item.type
       }))
     ),
-  
-  getOfficeStats: () => 
+
+  getOfficeStats: () =>
     apiClient.get('/api/stats/offices'),
-  
-  getAssignmentStats: () => 
+
+  getAssignmentStats: () =>
     apiClient.get('/api/stats/assignments'),
-  
-  getRoundRobinStats: () => 
+
+  getRoundRobinStats: () =>
     apiClient.get('/api/stats/round-robin'),
 };

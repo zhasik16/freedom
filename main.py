@@ -23,6 +23,8 @@ import math
 import random
 from collections import defaultdict, deque
 import asyncpg
+import ssl
+import traceback
 
 # ---------- КОНФИГУРАЦИЯ ----------
 YOUR_API_KEY = os.getenv("GEMINI_API")
@@ -189,53 +191,10 @@ def load_managers_from_file():
             data = json.load(f)
             MANAGERS = data.get('managers', [])
             print(f"✅ Загружено {len(MANAGERS)} менеджеров")
-            initialize_round_robin_queues()
             return MANAGERS
     except Exception as e:
         print(f"❌ Ошибка загрузки менеджеров: {e}")
         return []
-
-def initialize_round_robin_queues():
-    """Инициализирует очереди Round Robin"""
-    global round_robin_queues, assignment_history
-    
-    round_robin_queues.clear()
-    assignment_history.clear()
-    
-    managers_by_office = defaultdict(list)
-    for manager in MANAGERS:
-        office = manager.get('Офис', 'Unknown')
-        managers_by_office[office].append(manager)
-    
-    for office, managers in managers_by_office.items():
-        vip_managers = [m for m in managers if 'VIP' in m.get('Навыки', [])]
-        vip_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-        for manager in vip_managers[:2]:
-            round_robin_queues[office]['VIP'].append(manager)
-        
-        data_change_managers = [m for m in managers if 'Главный специалист' in m.get('Должность ', '')]
-        data_change_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-        for manager in data_change_managers[:2]:
-            round_robin_queues[office]['DATA_CHANGE'].append(manager)
-        
-        kz_managers = [m for m in managers if 'KZ' in m.get('Навыки', [])]
-        kz_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-        for manager in kz_managers[:2]:
-            round_robin_queues[office]['KZ'].append(manager)
-        
-        eng_managers = [m for m in managers if 'ENG' in m.get('Навыки', [])]
-        eng_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-        for manager in eng_managers[:2]:
-            round_robin_queues[office]['ENG'].append(manager)
-        
-        all_special = (vip_managers[:2] + data_change_managers[:2] + 
-                      kz_managers[:2] + eng_managers[:2])
-        general_managers = [m for m in managers if m not in all_special]
-        general_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-        for manager in general_managers[:2]:
-            round_robin_queues[office]['GENERAL'].append(manager)
-    
-    print("✅ Round Robin очереди инициализированы")
 
 load_business_units_from_file()
 load_managers_from_file()
@@ -333,62 +292,66 @@ def find_nearest_office(client_coords: Dict[str, float]) -> Dict[str, Any]:
     
     return nearest_office
 
+foreign_distribution_counter = 0
+
 def select_office_for_foreign_client() -> Dict[str, Any]:
     """Распределяет иностранных клиентов 50/50"""
+    global foreign_distribution_counter
     astana = next((o for o in BUSINESS_UNITS if o['Офис'] == 'Астана'), None)
     almaty = next((o for o in BUSINESS_UNITS if o['Офис'] == 'Алматы'), None)
     
     if not astana or not almaty:
         return BUSINESS_UNITS[0] if BUSINESS_UNITS else None
     
-    selected = random.choice([astana, almaty]).copy()
-    selected['assignment_reason'] = 'foreign_client_random_50_50'
+    # Строго по очереди (Round Robin 50/50)
+    office_to_pick = astana if foreign_distribution_counter % 2 == 0 else almaty
+    foreign_distribution_counter += 1
+    
+    selected = office_to_pick.copy()
+    selected['assignment_reason'] = 'foreign_client_50_50'
     selected['distance_km'] = None
     return selected
 
 def get_manager_by_round_robin(office: str, required_skills: List[str]) -> Optional[Dict[str, Any]]:
-    """Получает менеджера по Round Robin"""
-    global round_robin_queues
+    """Получает менеджера по Round Robin среди 2 самых свободных подходящих менеджеров"""
+    global MANAGERS
     
-    if 'VIP' in required_skills:
-        skill_key = 'VIP'
-    elif 'DATA_CHANGE' in required_skills:
-        skill_key = 'DATA_CHANGE'
-    elif 'KZ' in required_skills:
-        skill_key = 'KZ'
-    elif 'ENG' in required_skills:
-        skill_key = 'ENG'
-    else:
-        skill_key = 'GENERAL'
+    office_managers = [m for m in MANAGERS if m.get('Офис') == office]
     
-    queue = round_robin_queues.get(office, {}).get(skill_key, deque())
-    
-    if not queue:
-        queue = round_robin_queues.get(office, {}).get('GENERAL', deque())
-    
-    if not queue:
+    # Оставляем только тех, кто удовлетворяет ВСЕМ required_skills
+    suitable_managers = []
+    for manager in office_managers:
+        skills = manager.get('Навыки', [])
+        position = manager.get('Должность ', '')
+        
+        meets_requirements = True
+        if 'VIP' in required_skills and 'VIP' not in skills:
+            meets_requirements = False
+        if 'DATA_CHANGE' in required_skills and 'Главный специалист' not in position:
+            meets_requirements = False
+        if 'KZ' in required_skills and 'KZ' not in skills:
+            meets_requirements = False
+        if 'ENG' in required_skills and 'ENG' not in skills:
+            meets_requirements = False
+            
+        if meets_requirements:
+            suitable_managers.append(manager)
+            
+    if not suitable_managers:
         return None
+        
+    # Сортируем по нагрузке и берём топ-2
+    suitable_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
+    top_2_managers = suitable_managers[:2]
     
-    manager = queue[0]
-    queue.rotate(-1)
-    assignment_history[office][skill_key] += 1
-    
+    # Если их 2 и нагрузка одинаковая, берем первого (менее загруженные окажутся первыми)
+    # При следующем запросе нагрузка первого вырастет, и он уйдет на второе место — это и есть Round Robin
+    manager = top_2_managers[0]
     return manager
 
-def update_round_robin_queue(office: str, skill_key: str, old_manager: Dict[str, Any], new_manager: Dict[str, Any]):
-    """Обновляет Round Robin очередь"""
-    global round_robin_queues
-    
-    queue = round_robin_queues.get(office, {}).get(skill_key, deque())
-    
-    if queue:
-        new_queue = deque()
-        for manager in queue:
-            if manager['ФИО'] == old_manager['ФИО']:
-                new_queue.append(new_manager)
-            else:
-                new_queue.append(manager)
-        round_robin_queues[office][skill_key] = new_queue
+def update_round_robin_queue(*args, **kwargs):
+    # Pass as queuing is now fully dynamic based on load
+    pass
 
 def find_best_manager_for_ticket(ticket_data: Dict[str, Any], enriched_data: Dict[str, Any]) -> Dict[str, Any]:
     """Находит лучшего менеджера для тикета"""
@@ -445,34 +408,6 @@ def find_best_manager_for_ticket(ticket_data: Dict[str, Any], enriched_data: Dic
     
     selected_manager = get_manager_by_round_robin(office_name, required_skills)
     
-    if not selected_manager:
-        print(f"     ⚠️ Не найден менеджер по Round Robin, ищем любого подходящего...")
-        office_managers = [m for m in MANAGERS if m.get('Офис') == office_name]
-        
-        suitable_managers = []
-        for manager in office_managers:
-            skills = manager.get('Навыки', [])
-            position = manager.get('Должность ', '')
-            
-            meets_requirements = True
-            
-            if 'VIP' in required_skills and 'VIP' not in skills:
-                meets_requirements = False
-            if 'DATA_CHANGE' in required_skills and 'Главный специалист' not in position:
-                meets_requirements = False
-            if 'KZ' in required_skills and 'KZ' not in skills:
-                meets_requirements = False
-            if 'ENG' in required_skills and 'ENG' not in skills:
-                meets_requirements = False
-            
-            if meets_requirements:
-                suitable_managers.append(manager)
-        
-        if suitable_managers:
-            suitable_managers.sort(key=lambda x: x.get('Количество обращений в работе', 0))
-            selected_manager = suitable_managers[0]
-            print(f"     ✅ Найден резервный менеджер: {selected_manager['ФИО']}")
-    
     if selected_manager:
         print(f"     ✅ Итоговое назначение: {selected_manager['ФИО']} в {office_name}")
         return {
@@ -482,7 +417,8 @@ def find_best_manager_for_ticket(ticket_data: Dict[str, Any], enriched_data: Dic
             'required_skills': required_skills
         }
     
-    print(f"     ❌ Не найден подходящий менеджер")
+    # If no one is found (the warning was already printed above)
+    print(f"     ❌ Назначение на менеджера невозможно (нет подходящего сотрудника)")
     return None
 
 class GoogleAIClient:
@@ -983,17 +919,6 @@ async def create_ticket(ticket: TicketCreate):
         
         office = manager_assignment['office']['Офис']
         required_skills = manager_assignment.get('required_skills', [])
-        
-        if 'VIP' in required_skills:
-            update_round_robin_queue(office, 'VIP', old_manager, updated_manager)
-        elif 'DATA_CHANGE' in required_skills:
-            update_round_robin_queue(office, 'DATA_CHANGE', old_manager, updated_manager)
-        elif 'KZ' in required_skills:
-            update_round_robin_queue(office, 'KZ', old_manager, updated_manager)
-        elif 'ENG' in required_skills:
-            update_round_robin_queue(office, 'ENG', old_manager, updated_manager)
-        else:
-            update_round_robin_queue(office, 'GENERAL', old_manager, updated_manager)
     
     ticket_store.add(new_ticket)
     
@@ -1543,7 +1468,12 @@ async def startup_event():
     # ---------- PostgreSQL ----------
     if DATABASE_URL:
         try:
-            db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10, ssl="require")
+            print("⏳ Идет подключение к PostgreSQL...")
+            # Use asyncio.wait_for to prevent infinite hanging if port is blocked
+            db_pool = await asyncio.wait_for(
+                asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, ssl="require"),
+                timeout=10.0
+            )
             print("✅ Подключено к PostgreSQL")
 
             async with db_pool.acquire() as conn:
@@ -1644,10 +1574,9 @@ async def startup_event():
                         'Количество обращений в работе': r['current_load']
                     })
 
-                initialize_round_robin_queues()
-
         except Exception as e:
             print(f"❌ PostgreSQL Error: {e}")
+            traceback.print_exc()
             print("⚠️ Falling back to in-memory mode")
     else:
         print("⚠️ DATABASE_URL не задан, используется in-memory режим")
@@ -1657,8 +1586,6 @@ async def startup_event():
     print(f"📍 Офисы:")
     for office in BUSINESS_UNITS:
         print(f"   - {office['Офис']}: {office.get('Адрес', '')}")
-    print("="*70)
-    print("🔄 Round Robin очереди инициализированы")
     print("="*70)
 
 
